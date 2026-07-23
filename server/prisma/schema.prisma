@@ -3,23 +3,8 @@ generator client {
 }
 
 datasource db {
-  provider = "postgresql"
+  provider = "sqlite"
   url      = env("DATABASE_URL")
-}
-
-enum UserStatus {
-  ACTIVE
-  DISABLED
-  LEFT
-}
-
-enum UserRole {
-  ADMIN
-  CONTENT_MANAGER
-  WRITER
-  DESIGNER
-  DATA_OPERATOR
-  MEMBER
 }
 
 model User {
@@ -29,9 +14,9 @@ model User {
   phone        String?    @unique
   password     String
   avatar       String?
-  role         UserRole   @default(MEMBER)
+  role         String     @default("MEMBER")
   department   String?
-  status       UserStatus @default(ACTIVE)
+  status       String     @default("ACTIVE")
   createdAt    DateTime   @default(now())
   updatedAt    DateTime   @updatedAt
   lastLoginAt  DateTime?
@@ -40,6 +25,11 @@ model User {
   assignedTasks   TaskMember[]
   notifications   Notification[]
   operationLogs   OperationLog[]
+  ideas           Idea[]
+  ideaComments    IdeaComment[]
+  ideaVotes       IdeaVote[]
+  materials       Material[]
+  taskStatusLogs  TaskStatusLog[]
 
   @@map("users")
 }
@@ -61,7 +51,7 @@ model Idea {
   coverIdeas   String?
   contentStart String?
   refUrl       String?
-  refImages    String[]
+  refImages    String?
   status       String   @default("PENDING")
   score        Int?
   priority     String?
@@ -72,9 +62,9 @@ model Idea {
   updatedAt    DateTime @updatedAt
 
   creator      User          @relation(fields: [createdById], references: [id])
-  product      Product?      @relation(fields: [productId], references: [id])
-  carModel     CarModel?     @relation(fields: [carModelId], references: [id])
-  fragrance    Fragrance?    @relation(fields: [fragranceId], references: [id])
+  product      Product?      @relation(fields: [productId], references: [id})
+  carModel     CarModel?     @relation(fields: [carModelId], references: [id})
+  fragrance    Fragrance?    @relation(fields: [fragranceId], references: [id})
   comments     IdeaComment[]
   votes        IdeaVote[]
   attachments  IdeaAttachment[]
@@ -122,27 +112,27 @@ model IdeaAttachment {
 }
 
 model Product {
-  id           String   @id @default(uuid())
-  name         String
-  code         String?  @unique
-  series       String?
-  status       String   @default("ACTIVE")
-  mainImage    String?
-  installImage String?
-  highlights   String?
-  material     String?
-  colors       String[]
-  fragrances   String[]
-  installPos   String?
+  id            String   @id @default(uuid())
+  name          String
+  code          String?  @unique
+  series        String?
+  status        String   @default("ACTIVE")
+  mainImage     String?
+  installImage  String?
+  highlights    String?
+  material      String?
+  colors        String?
+  fragrances    String?
+  installPos    String?
   installMethod String?
-  price        Decimal? @db.Decimal(10, 2)
-  salePrice    Decimal? @db.Decimal(10, 2)
-  stock        Int      @default(0)
-  link         String?
-  faq          String?
+  price         Decimal?
+  salePrice     Decimal?
+  stock         Int      @default(0)
+  link          String?
+  faq           String?
   standardAnswer String?
-  createdAt    DateTime @default(now())
-  updatedAt    DateTime @updatedAt
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
 
   carModels    ProductCarModel[]
   materials    MaterialProduct[]
@@ -165,16 +155,16 @@ model CarBrand {
 }
 
 model CarModel {
-  id           String   @id @default(uuid())
-  name         String
-  brandId      String
-  series       String?
-  year         String?
+  id            String   @id @default(uuid())
+  name          String
+  brandId       String
+  series        String?
+  year          String?
   interiorStyle String?
-  image        String?
-  remark       String?
-  createdAt    DateTime @default(now())
-  updatedAt    DateTime @updatedAt
+  image         String?
+  remark        String?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
 
   brand        CarBrand @relation(fields: [brandId], references: [id])
   products     ProductCarModel[]
@@ -188,8 +178,8 @@ model CarModel {
 }
 
 model ProductCarModel {
-  id        String @id @default(uuid())
-  productId String
+  id         String @id @default(uuid())
+  productId  String
   carModelId String
 
   product  Product   @relation(fields: [productId], references: [id], onDelete: Cascade)
@@ -205,9 +195,9 @@ model Fragrance {
   description String?
   createdAt   DateTime @default(now())
 
-  ideas       Idea[]
-  materials   Material[]
-  notes       PublishedNote[]
+  ideas     Idea[]
+  materials Material[]
+  notes     PublishedNote[]
 
   @@map("fragrances")
 }
@@ -224,7 +214,7 @@ model Material {
   fragranceId  String?
   scene        String?
   contentType  String?
-  tags         String[]
+  tags         String?
   source       String?
   copyright    String?
   canPublish   Boolean  @default(false)
@@ -238,7 +228,7 @@ model Material {
   uploadr      User?    @relation(fields: [uploadedById], references: [id])
   product      Product? @relation(fields: [productId], references: [id])
   carModel     CarModel? @relation(fields: [carModelId], references: [id])
-  fragrance    Fragrance? @relation(fields: [fragranceId], references: [id])
+  fragrance    Fragrance? @relation(fields: [fragranceId], references: [id})
   tagsRelation MaterialTag[]
   productsRelation MaterialProduct[]
   carModelsRelation MaterialCarModel[]
@@ -308,10 +298,10 @@ model ContentTask {
   designDeadline  DateTime?
   finalDeadline   DateTime?
   finalTitle      String?
-  altTitles       String[]
+  altTitles       String?
   content         String?
   coverText       String?
-  hashtags        String[]
+  hashtags        String?
   creatorId       String
   createdAt       DateTime @default(now())
   updatedAt       DateTime @updatedAt
@@ -320,7 +310,7 @@ model ContentTask {
   idea             Idea?        @relation(fields: [ideaId], references: [id])
   creator          User         @relation("TaskCreator", fields: [creatorId], references: [id])
   product          Product?     @relation(fields: [productId], references: [id])
-  carModel         CarModel?    @relation(fields: [carModelId], references: [id])
+  carModel         CarModel?    @relation(fields: [carModelId], references: [id})
   members          TaskMember[]
   materials        TaskMaterial[]
   statusLogs       TaskStatusLog[]
@@ -332,7 +322,7 @@ model ContentTask {
 }
 
 model TaskMember {
-  id        String   @id @default(uuid())
+  id        String @id @default(uuid())
   taskId    String
   userId    String
   role      String
@@ -357,13 +347,13 @@ model TaskMaterial {
 }
 
 model TaskStatusLog {
-  id        String   @id @default(uuid())
-  taskId    String
+  id         String   @id @default(uuid())
+  taskId     String
   fromStatus String?
-  toStatus  String
+  toStatus   String
   operatorId String
-  note      String?
-  createdAt DateTime @default(now())
+  note       String?
+  createdAt  DateTime @default(now())
 
   task     ContentTask @relation(fields: [taskId], references: [id], onDelete: Cascade)
   operator User        @relation(fields: [operatorId], references: [id])
@@ -372,14 +362,14 @@ model TaskStatusLog {
 }
 
 model ContentVersion {
-  id        String   @id @default(uuid())
-  taskId    String
-  version   Int
-  title     String?
-  content   String?
-  changedBy String
+  id         String   @id @default(uuid())
+  taskId     String
+  version    Int
+  title      String?
+  content    String?
+  changedBy  String
   changeNote String?
-  createdAt DateTime @default(now())
+  createdAt  DateTime @default(now())
 
   task ContentTask @relation(fields: [taskId], references: [id], onDelete: Cascade)
 
@@ -388,12 +378,12 @@ model ContentVersion {
 }
 
 model TaskReview {
-  id        String   @id @default(uuid())
-  taskId    String
+  id         String   @id @default(uuid())
+  taskId     String
   reviewerId String
-  status    String
-  content   String?
-  createdAt DateTime @default(now())
+  status     String
+  content    String?
+  createdAt  DateTime @default(now())
 
   task ContentTask @relation(fields: [taskId], references: [id], onDelete: Cascade)
 
@@ -429,11 +419,11 @@ model PublishedNote {
   finalTitle     String?
   finalContent   String?
   finalCover     String?
-  usedMaterials  String[]
+  usedMaterials  String?
   titleStructure String?
   coverType      String?
   isPaid         Boolean  @default(false)
-  paidAmount     Decimal? @db.Decimal(10, 2)
+  paidAmount     Decimal?
   createdAt      DateTime @default(now())
   updatedAt      DateTime @updatedAt
 
@@ -441,35 +431,35 @@ model PublishedNote {
   task      ContentTask?  @relation(fields: [taskId], references: [id])
   idea      Idea?         @relation(fields: [ideaId], references: [id])
   product   Product?      @relation(fields: [productId], references: [id])
-  carModel  CarModel?     @relation(fields: [carModelId], references: [id])
-  fragrance Fragrance?    @relation(fields: [fragranceId], references: [id])
+  carModel  CarModel?     @relation(fields: [carModelId], references: [id})
+  fragrance Fragrance?    @relation(fields: [fragranceId], references: [id})
   metrics   NoteMetric[]
 
   @@map("published_notes")
 }
 
 model NoteMetric {
-  id              String   @id @default(uuid())
-  noteId          String
-  recordedAt      DateTime @default(now())
-  views           Int      @default(0)
-  likes           Int      @default(0)
-  collects        Int      @default(0)
-  comments        Int      @default(0)
-  shares          Int      @default(0)
-  newFollowers    Int      @default(0)
-  profileVisits   Int      @default(0)
- 私信数           Int      @default(0)
-  productClicks   Int      @default(0)
-  cartAdds        Int      @default(0)
-  orders          Int      @default(0)
-  orderAmount     Decimal? @db.Decimal(10, 2)
-  refunds         Int      @default(0)
-  paidAmount      Decimal? @db.Decimal(10, 2)
-  screenshot      String?
+  id               String   @id @default(uuid())
+  noteId           String
+  recordedAt       DateTime @default(now())
+  views            Int      @default(0)
+  likes            Int      @default(0)
+  collects         Int      @default(0)
+  comments         Int      @default(0)
+  shares           Int      @default(0)
+  newFollowers     Int      @default(0)
+  profileVisits    Int      @default(0)
+  dmCount          Int      @default(0)
+  productClicks    Int      @default(0)
+  cartAdds         Int      @default(0)
+  orders           Int      @default(0)
+  orderAmount      Decimal?
+  refunds          Int      @default(0)
+  paidAmount       Decimal?
+  screenshot       String?
   highFreqQuestions String?
-  userFeedback    String?
-  abnormalNote    String?
+  userFeedback     String?
+  abnormalNote     String?
 
   note PublishedNote @relation(fields: [noteId], references: [id], onDelete: Cascade)
 
@@ -492,15 +482,15 @@ model Notification {
 }
 
 model OperationLog {
-  id        String   @id @default(uuid())
-  userId    String
-  action    String
+  id         String   @id @default(uuid())
+  userId     String
+  action     String
   entityType String?
-  entityId  String?
-  detail    String?
-  createdAt DateTime @default(now())
+  entityId   String?
+  detail     String?
+  createdAt  DateTime @default(now())
 
-  user User @relation(fields: [userId], references: [id])
+  user User @relation(fields: [userId], references: [id})
 
   @@map("operation_logs")
 }

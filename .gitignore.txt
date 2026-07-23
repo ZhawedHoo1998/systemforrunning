@@ -1,0 +1,93 @@
+# ==============================
+# Dependencies
+# ==============================
+node_modules/
+client/node_modules/
+server/node_modules/
+
+# ==============================
+# Build output
+# ==============================
+dist/
+build/
+client/dist/
+server/dist/
+.vite/
+.next/
+
+# ==============================
+# Environment and secrets
+# ==============================
+.env
+.env.*
+!.env.example
+
+client/.env
+client/.env.*
+!client/.env.example
+
+server/.env
+server/.env.*
+!server/.env.example
+
+# ==============================
+# Local AI agent configuration
+# ==============================
+.claude/settings.local.json
+.cursor/
+.aider*
+.codex/
+
+# ==============================
+# Runtime uploads and temporary files
+# ==============================
+uploads/
+server/uploads/
+client/uploads/
+tmp/
+temp/
+.cache/
+
+# ==============================
+# Logs
+# ==============================
+*.log
+logs/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# ==============================
+# Test output
+# ==============================
+coverage/
+.nyc_output/
+
+# ==============================
+# Local database files
+# Only relevant if SQLite is used
+# ==============================
+*.db
+*.db-journal
+*.sqlite
+*.sqlite3
+
+# ==============================
+# IDE
+# ==============================
+.vscode/
+.idea/
+*.iml
+
+# ==============================
+# Operating system files
+# ==============================
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ==============================
+# TypeScript cache
+# ==============================
+*.tsbuildinfo

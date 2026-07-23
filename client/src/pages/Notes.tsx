@@ -243,8 +243,8 @@ export default function Notes() {
             )}
 
             <h4 style={{ marginTop: 24 }}>基本信息</h4>
-            <p><strong>产品：</strong>{currentNote.product?.name || '-'}</p>
-            <p><strong>车型：</strong>{currentNote.carModel ? `${currentNote.carModel.brand?.name || ''} ${currentNote.carModel.name}` : '-'}</p>
+            <p><strong>产品：</strong>{currentNote.productRelation?.name || '-'}</p>
+            <p><strong>车型：</strong>{currentNote.carModelRelation ? `${currentNote.carModelRelation.brand?.name || ''} ${currentNote.carModelRelation.name}` : '-'}</p>
             <p><strong>香型：</strong>{currentNote.fragrance?.name || '-'}</p>
             <p><strong>内容形式：</strong>{currentNote.contentType || '-'}</p>
             <p><strong>标题结构：</strong>{currentNote.titleStructure || '-'}</p>

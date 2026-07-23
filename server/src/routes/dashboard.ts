@@ -10,89 +10,60 @@ dashboardRouter.get('/overview', async (req: AuthRequest, res) => {
   try {
     const now = new Date();
     const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
-    const startOfWeek = new Date(now.setDate(now.getDate() - now.getDay()));
 
     const [
       monthIdeas,
       monthAdoptedIdeas,
       monthPublishedNotes,
-      monthViews,
-      monthLikes,
-      monthCollects,
-      monthComments,
-      monthNewFollowers,
-      monthDMs,
-      monthOrders,
-      monthOrderAmount,
-      monthPaidAmount,
+      notesWithMetrics,
     ] = await Promise.all([
-      prisma.idea.count({
-        where: { createdAt: { gte: startOfMonth } },
-      }),
-      prisma.idea.count({
-        where: { status: 'ADOPTED', updatedAt: { gte: startOfMonth } },
-      }),
-      prisma.publishedNote.count({
+      prisma.idea.count({ where: { createdAt: { gte: startOfMonth } } }),
+      prisma.idea.count({ where: { status: 'ADOPTED', updatedAt: { gte: startOfMonth } } }),
+      prisma.publishedNote.count({ where: { publishedAt: { gte: startOfMonth } } }),
+      prisma.publishedNote.findMany({
         where: { publishedAt: { gte: startOfMonth } },
-      }),
-      prisma.noteMetric.aggregate({
-        where: { recordedAt: { gte: startOfMonth } },
-        _sum: { views: true },
-      }),
-      prisma.noteMetric.aggregate({
-        where: { recordedAt: { gte: startOfMonth } },
-        _sum: { likes: true },
-      }),
-      prisma.noteMetric.aggregate({
-        where: { recordedAt: { gte: startOfMonth } },
-        _sum: { collects: true },
-      }),
-      prisma.noteMetric.aggregate({
-        where: { recordedAt: { gte: startOfMonth } },
-        _sum: { comments: true },
-      }),
-      prisma.noteMetric.aggregate({
-        where: { recordedAt: { gte: startOfMonth } },
-        _sum: { newFollowers: true },
-      }),
-      prisma.noteMetric.aggregate({
-        where: { recordedAt: { gte: startOfMonth } },
-        _sum: { 私信数: true },
-      }),
-      prisma.noteMetric.aggregate({
-        where: { recordedAt: { gte: startOfMonth } },
-        _sum: { orders: true },
-      }),
-      prisma.noteMetric.aggregate({
-        where: { recordedAt: { gte: startOfMonth } },
-        _sum: { orderAmount: true },
-      }),
-      prisma.noteMetric.aggregate({
-        where: { recordedAt: { gte: startOfMonth } },
-        _sum: { paidAmount: true },
+        include: {
+          metrics: { orderBy: { recordedAt: 'desc' }, take: 1 },
+        },
       }),
     ]);
 
-    const totalViews = monthViews._sum.views || 0;
-    const totalInteractions = (monthLikes._sum.likes || 0) + (monthCollects._sum.collects || 0) + (monthComments._sum.comments || 0);
-    const totalPaid = Number(monthPaidAmount._sum.paidAmount || 0);
+    let totalViews = 0, totalLikes = 0, totalCollects = 0, totalComments = 0;
+    let totalNewFollowers = 0, totalDMs = 0, totalOrders = 0, totalOrderAmount = 0, totalPaidAmount = 0;
+
+    for (const note of notesWithMetrics) {
+      const latest = note.metrics[0];
+      if (latest) {
+        totalViews += latest.views || 0;
+        totalLikes += latest.likes || 0;
+        totalCollects += latest.collects || 0;
+        totalComments += latest.comments || 0;
+        totalNewFollowers += latest.newFollowers || 0;
+        totalDMs += latest.dmCount || 0;
+        totalOrders += latest.orders || 0;
+        totalOrderAmount += Number(latest.orderAmount || 0);
+        totalPaidAmount += Number(latest.paidAmount || 0);
+      }
+    }
+
+    const totalInteractions = totalLikes + totalCollects + totalComments;
 
     res.json({
       monthIdeas,
       monthAdoptedIdeas,
       monthPublishedNotes,
       monthViews: totalViews,
-      monthLikes: monthLikes._sum.likes || 0,
-      monthCollects: monthCollects._sum.collects || 0,
-      monthComments: monthComments._sum.comments || 0,
-      monthNewFollowers: monthNewFollowers._sum.newFollowers || 0,
-      monthDMs: monthDMs._sum.私信数 || 0,
-      monthOrders: monthOrders._sum.orders || 0,
-      monthOrderAmount: Number(monthOrderAmount._sum.orderAmount || 0),
-      monthPaidAmount: totalPaid,
+      monthLikes: totalLikes,
+      monthCollects: totalCollects,
+      monthComments: totalComments,
+      monthNewFollowers: totalNewFollowers,
+      monthDMs: totalDMs,
+      monthOrders: totalOrders,
+      monthOrderAmount: totalOrderAmount,
+      monthPaidAmount: totalPaidAmount,
       avgInteractionRate: totalViews > 0 ? ((totalInteractions / totalViews) * 100).toFixed(2) + '%' : '0.00%',
-      avgCollectRate: totalViews > 0 ? (((monthCollects._sum.collects || 0) / totalViews) * 100).toFixed(2) + '%' : '0.00%',
-      avgDMRate: totalViews > 0 ? (((monthDMs._sum.私信数 || 0) / totalViews) * 100).toFixed(2) + '%' : '0.00%',
+      avgCollectRate: totalViews > 0 ? ((totalCollects / totalViews) * 100).toFixed(2) + '%' : '0.00%',
+      avgDMRate: totalViews > 0 ? ((totalDMs / totalViews) * 100).toFixed(2) + '%' : '0.00%',
     });
   } catch (error) {
     console.error('Dashboard overview error:', error);
@@ -102,8 +73,8 @@ dashboardRouter.get('/overview', async (req: AuthRequest, res) => {
 
 dashboardRouter.get('/weekly', async (req: AuthRequest, res) => {
   try {
-    const now = new Date();
-    const weekAgo = new Date(now.getDate() - 7);
+    const weekAgo = new Date();
+    weekAgo.setDate(weekAgo.getDate() - 7);
 
     const [
       weekIdeas,
@@ -111,15 +82,9 @@ dashboardRouter.get('/weekly', async (req: AuthRequest, res) => {
       weekPublishedNotes,
       weekViews,
     ] = await Promise.all([
-      prisma.idea.count({
-        where: { createdAt: { gte: weekAgo } },
-      }),
-      prisma.idea.count({
-        where: { status: 'ADOPTED', updatedAt: { gte: weekAgo } },
-      }),
-      prisma.publishedNote.count({
-        where: { publishedAt: { gte: weekAgo } },
-      }),
+      prisma.idea.count({ where: { createdAt: { gte: weekAgo } } }),
+      prisma.idea.count({ where: { status: 'ADOPTED', updatedAt: { gte: weekAgo } } }),
+      prisma.publishedNote.count({ where: { publishedAt: { gte: weekAgo } } }),
       prisma.noteMetric.aggregate({
         where: { recordedAt: { gte: weekAgo } },
         _sum: { views: true },
@@ -139,7 +104,7 @@ dashboardRouter.get('/weekly', async (req: AuthRequest, res) => {
 
 dashboardRouter.get('/trends', async (req: AuthRequest, res) => {
   try {
-    const { startDate, endDate, type } = req.query;
+    const { startDate, endDate } = req.query;
 
     const where: any = {};
     if (startDate || endDate) {
@@ -152,20 +117,29 @@ dashboardRouter.get('/trends', async (req: AuthRequest, res) => {
       where,
       orderBy: { recordedAt: 'asc' },
       select: {
+        noteId: true,
         recordedAt: true,
         views: true,
         likes: true,
         collects: true,
         comments: true,
         shares: true,
-        私信数: true,
+        dmCount: true,
         orders: true,
         orderAmount: true,
       },
     });
 
-    const grouped: any = {};
+    const latestByNoteAndDate: Record<string, any> = {};
     metrics.forEach((m) => {
+      const key = `${m.noteId}_${m.recordedAt.toISOString().split('T')[0]}`;
+      if (!latestByNoteAndDate[key] || m.recordedAt > latestByNoteAndDate[key].recordedAt) {
+        latestByNoteAndDate[key] = m;
+      }
+    });
+
+    const grouped: Record<string, any> = {};
+    Object.values(latestByNoteAndDate).forEach((m: any) => {
       const date = m.recordedAt.toISOString().split('T')[0];
       if (!grouped[date]) {
         grouped[date] = { date, views: 0, likes: 0, collects: 0, comments: 0, shares: 0, dms: 0, orders: 0, orderAmount: 0 };
@@ -175,7 +149,7 @@ dashboardRouter.get('/trends', async (req: AuthRequest, res) => {
       grouped[date].collects += m.collects || 0;
       grouped[date].comments += m.comments || 0;
       grouped[date].shares += m.shares || 0;
-      grouped[date].dms += m.私信数 || 0;
+      grouped[date].dms += m.dmCount || 0;
       grouped[date].orders += m.orders || 0;
       grouped[date].orderAmount += Number(m.orderAmount || 0);
     });
@@ -195,22 +169,14 @@ dashboardRouter.get('/rankings', async (req: AuthRequest, res) => {
       return res.status(400).json({ error: '无效的排名类型' });
     }
 
-    const fieldMap: any = {
-      views: 'views',
-      collects: 'collects',
-      dms: '私信数',
-      orders: 'orders',
-    };
+    const fieldMap: any = { views: 'views', collects: 'collects', dms: 'dmCount', orders: 'orders' };
 
     const notes = await prisma.publishedNote.findMany({
       include: {
-        metrics: {
-          orderBy: { recordedAt: 'desc' },
-          take: 1,
-        },
-        carModel: { include: { brand: true } },
-        product: true,
-        fragrance: true,
+        metrics: { orderBy: { recordedAt: 'desc' }, take: 1 },
+        carModelRelation: { include: { brand: true } },
+        productRelation: true,
+        fragranceRelation: true,
       },
     });
 
@@ -218,10 +184,10 @@ dashboardRouter.get('/rankings', async (req: AuthRequest, res) => {
       .map((note) => ({
         id: note.id,
         title: note.finalTitle || note.title,
-        carModel: note.carModel?.name,
-        brand: note.carModel?.brand?.name,
-        product: note.product?.name,
-        fragrance: note.fragrance?.name,
+        carModel: note.carModelRelation?.name,
+        brand: note.carModelRelation?.brand?.name,
+        product: note.productRelation?.name,
+        fragrance: note.fragranceRelation?.name,
         value: note.metrics[0]?.[fieldMap[type as string]] || 0,
       }))
       .sort((a, b) => b.value - a.value)
@@ -258,18 +224,14 @@ dashboardRouter.get('/my-todos', async (req: AuthRequest, res) => {
       (t) => t.finalDeadline && new Date(t.finalDeadline) >= today && new Date(t.finalDeadline) < tomorrow
     );
 
-    const pendingWriting = myTasks.filter(
-      (t) => t.status === 'ASSIGNED' || t.status === 'WRITING'
-    );
+    const pendingWriting = myTasks.filter((t) => t.status === 'ASSIGNED' || t.status === 'WRITING');
     const pendingModify = myTasks.filter((t) => t.status === 'MODIFYING');
     const pendingDesign = myTasks.filter((t) => t.status === 'PENDING_DESIGN' || t.status === 'DESIGNING');
     const pendingReview = myTasks.filter((t) => t.status === 'PENDING_REVIEW' || t.status === 'PENDING_FINAL');
 
     const pendingDataFill = await prisma.publishedNote.count({
       where: {
-        publishedAt: {
-          lte: new Date(Date.now() - 2 * 60 * 60 * 1000),
-        },
+        publishedAt: { lte: new Date(Date.now() - 2 * 60 * 60 * 1000) },
         metrics: { none: {} },
       },
     });

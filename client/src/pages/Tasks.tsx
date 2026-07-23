@@ -106,8 +106,8 @@ export default function Tasks() {
   const columns = [
     { title: '任务名称', dataIndex: 'title', ellipsis: true, width: 200 },
     { title: '关联选题', dataIndex: 'idea', render: (i: any) => i?.title || '-' },
-    { title: '产品', dataIndex: 'product', render: (p: any) => p?.name || '-' },
-    { title: '车型', dataIndex: 'carModel', render: (m: any) => m ? `${m.brand?.name || ''} ${m.name}` : '-' },
+    { title: '产品', dataIndex: 'productRelation', render: (p: any) => p?.name || '-' },
+    { title: '车型', dataIndex: 'carModelRelation', render: (m: any) => m ? `${m.brand?.name || ''} ${m.name}` : '-' },
     {
       title: '优先级',
       dataIndex: 'priority',
@@ -222,8 +222,8 @@ export default function Tasks() {
             </Space>
 
             <p><strong>关联选题：</strong>{currentTask.idea?.title || '-'}</p>
-            <p><strong>产品：</strong>{currentTask.product?.name || '-'}</p>
-            <p><strong>车型：</strong>{currentTask.carModel ? `${currentTask.carModel.brand?.name || ''} ${currentTask.carModel.name}` : '-'}</p>
+            <p><strong>产品：</strong>{currentTask.productRelation?.name || '-'}</p>
+            <p><strong>车型：</strong>{currentTask.carModelRelation ? `${currentTask.carModelRelation.brand?.name || ''} ${currentTask.carModelRelation.name}` : '-'}</p>
             <p><strong>计划发布：</strong>{currentTask.planPublishAt ? dayjs(currentTask.planPublishAt).format('YYYY-MM-DD') : '-'}</p>
             <p><strong>写作截止：</strong>{currentTask.writingDeadline ? dayjs(currentTask.writingDeadline).format('YYYY-MM-DD') : '-'}</p>
             <p><strong>最终截止：</strong>{currentTask.finalDeadline ? dayjs(currentTask.finalDeadline).format('YYYY-MM-DD') : '-'}</p>
