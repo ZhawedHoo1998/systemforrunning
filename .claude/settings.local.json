@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(mkdir -p \"C:/Users/InZy/Desktop/香氛素材管理/server/prisma\")",
+      "Bash(mkdir -p \"C:/Users/InZy/Desktop/香氛素材管理/server/src/{routes,middleware,controllers,services,utils}\")",
+      "Bash(mkdir -p \"C:/Users/InZy/Desktop/香氛素材管理/client/src/{components,pages,hooks,utils,api,assets}\")"
+    ]
+  }
+}

@@ -1,0 +1,506 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum UserStatus {
+  ACTIVE
+  DISABLED
+  LEFT
+}
+
+enum UserRole {
+  ADMIN
+  CONTENT_MANAGER
+  WRITER
+  DESIGNER
+  DATA_OPERATOR
+  MEMBER
+}
+
+model User {
+  id           String     @id @default(uuid())
+  name         String
+  email        String?    @unique
+  phone        String?    @unique
+  password     String
+  avatar       String?
+  role         UserRole   @default(MEMBER)
+  department   String?
+  status       UserStatus @default(ACTIVE)
+  createdAt    DateTime   @default(now())
+  updatedAt    DateTime   @updatedAt
+  lastLoginAt  DateTime?
+
+  createdTasks    ContentTask[] @relation("TaskCreator")
+  assignedTasks   TaskMember[]
+  notifications   Notification[]
+  operationLogs   OperationLog[]
+
+  @@map("users")
+}
+
+model Idea {
+  id           String   @id @default(uuid())
+  title        String
+  summary      String?
+  contentType  String?
+  contentGoal  String?
+  targetUser   String?
+  productId    String?
+  carModelId   String?
+  fragranceId  String?
+  scene        String?
+  painPoint    String?
+  corePoint    String?
+  titleIdeas   String?
+  coverIdeas   String?
+  contentStart String?
+  refUrl       String?
+  refImages    String[]
+  status       String   @default("PENDING")
+  score        Int?
+  priority     String?
+  reviewerId   String?
+  reviewNote   String?
+  createdById  String
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  creator      User          @relation(fields: [createdById], references: [id])
+  product      Product?      @relation(fields: [productId], references: [id])
+  carModel     CarModel?     @relation(fields: [carModelId], references: [id])
+  fragrance    Fragrance?    @relation(fields: [fragranceId], references: [id])
+  comments     IdeaComment[]
+  votes        IdeaVote[]
+  attachments  IdeaAttachment[]
+  tasks        ContentTask[]
+
+  @@map("ideas")
+}
+
+model IdeaComment {
+  id        String   @id @default(uuid())
+  content   String
+  ideaId    String
+  userId    String
+  createdAt DateTime @default(now())
+
+  idea Idea @relation(fields: [ideaId], references: [id], onDelete: Cascade)
+  user User @relation(fields: [userId], references: [id])
+
+  @@map("idea_comments")
+}
+
+model IdeaVote {
+  id        String   @id @default(uuid())
+  ideaId    String
+  userId    String
+  createdAt DateTime @default(now())
+
+  idea Idea @relation(fields: [ideaId], references: [id], onDelete: Cascade)
+  user User @relation(fields: [userId], references: [id])
+
+  @@unique([ideaId, userId])
+  @@map("idea_votes")
+}
+
+model IdeaAttachment {
+  id        String   @id @default(uuid())
+  url       String
+  type      String?
+  ideaId    String
+  createdAt DateTime @default(now())
+
+  idea Idea @relation(fields: [ideaId], references: [id], onDelete: Cascade)
+
+  @@map("idea_attachments")
+}
+
+model Product {
+  id           String   @id @default(uuid())
+  name         String
+  code         String?  @unique
+  series       String?
+  status       String   @default("ACTIVE")
+  mainImage    String?
+  installImage String?
+  highlights   String?
+  material     String?
+  colors       String[]
+  fragrances   String[]
+  installPos   String?
+  installMethod String?
+  price        Decimal? @db.Decimal(10, 2)
+  salePrice    Decimal? @db.Decimal(10, 2)
+  stock        Int      @default(0)
+  link         String?
+  faq          String?
+  standardAnswer String?
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  carModels    ProductCarModel[]
+  materials    MaterialProduct[]
+  ideas        Idea[]
+  tasks        ContentTask[]
+  notes        PublishedNote[]
+
+  @@map("products")
+}
+
+model CarBrand {
+  id        String   @id @default(uuid())
+  name      String   @unique
+  logo      String?
+  createdAt DateTime @default(now())
+
+  carModels CarModel[]
+
+  @@map("car_brands")
+}
+
+model CarModel {
+  id           String   @id @default(uuid())
+  name         String
+  brandId      String
+  series       String?
+  year         String?
+  interiorStyle String?
+  image        String?
+  remark       String?
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  brand        CarBrand @relation(fields: [brandId], references: [id])
+  products     ProductCarModel[]
+  materials    MaterialCarModel[]
+  ideas        Idea[]
+  tasks        ContentTask[]
+  notes        PublishedNote[]
+
+  @@unique([name, brandId])
+  @@map("car_models")
+}
+
+model ProductCarModel {
+  id        String @id @default(uuid())
+  productId String
+  carModelId String
+
+  product  Product   @relation(fields: [productId], references: [id], onDelete: Cascade)
+  carModel CarModel  @relation(fields: [carModelId], references: [id], onDelete: Cascade)
+
+  @@unique([productId, carModelId])
+  @@map("product_car_models")
+}
+
+model Fragrance {
+  id          String   @id @default(uuid())
+  name        String   @unique
+  description String?
+  createdAt   DateTime @default(now())
+
+  ideas       Idea[]
+  materials   Material[]
+  notes       PublishedNote[]
+
+  @@map("fragrances")
+}
+
+model Material {
+  id           String   @id @default(uuid())
+  name         String
+  type         String
+  url          String?
+  link         String?
+  textContent  String?
+  productId    String?
+  carModelId   String?
+  fragranceId  String?
+  scene        String?
+  contentType  String?
+  tags         String[]
+  source       String?
+  copyright    String?
+  canPublish   Boolean  @default(false)
+  clarity      String?
+  uploadedById String?
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+  useCount     Int      @default(0)
+  lastUsedAt   DateTime?
+
+  uploadr      User?    @relation(fields: [uploadedById], references: [id])
+  product      Product? @relation(fields: [productId], references: [id])
+  carModel     CarModel? @relation(fields: [carModelId], references: [id])
+  fragrance    Fragrance? @relation(fields: [fragranceId], references: [id])
+  tagsRelation MaterialTag[]
+  productsRelation MaterialProduct[]
+  carModelsRelation MaterialCarModel[]
+  tasks        TaskMaterial[]
+
+  @@map("materials")
+}
+
+model Tag {
+  id        String   @id @default(uuid())
+  name      String   @unique
+  color     String?
+  createdAt DateTime @default(now())
+
+  materials MaterialTag[]
+
+  @@map("tags")
+}
+
+model MaterialTag {
+  id         String @id @default(uuid())
+  materialId String
+  tagId      String
+
+  material Material @relation(fields: [materialId], references: [id], onDelete: Cascade)
+  tag      Tag      @relation(fields: [tagId], references: [id], onDelete: Cascade)
+
+  @@unique([materialId, tagId])
+  @@map("material_tags")
+}
+
+model MaterialProduct {
+  id         String @id @default(uuid())
+  materialId String
+  productId  String
+
+  material Material @relation(fields: [materialId], references: [id], onDelete: Cascade)
+  product  Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
+
+  @@unique([materialId, productId])
+  @@map("material_products")
+}
+
+model MaterialCarModel {
+  id         String @id @default(uuid())
+  materialId String
+  carModelId String
+
+  material Material @relation(fields: [materialId], references: [id], onDelete: Cascade)
+  carModel CarModel @relation(fields: [carModelId], references: [id], onDelete: Cascade)
+
+  @@unique([materialId, carModelId])
+  @@map("material_car_models")
+}
+
+model ContentTask {
+  id              String   @id @default(uuid())
+  title           String
+  ideaId          String?
+  contentType     String?
+  productId       String?
+  carModelId      String?
+  priority        String   @default("NORMAL")
+  status          String   @default("PENDING")
+  planPublishAt   DateTime?
+  writingDeadline DateTime?
+  designDeadline  DateTime?
+  finalDeadline   DateTime?
+  finalTitle      String?
+  altTitles       String[]
+  content         String?
+  coverText       String?
+  hashtags        String[]
+  creatorId       String
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+  submitCount     Int      @default(0)
+
+  idea             Idea?        @relation(fields: [ideaId], references: [id])
+  creator          User         @relation("TaskCreator", fields: [creatorId], references: [id])
+  product          Product?     @relation(fields: [productId], references: [id])
+  carModel         CarModel?    @relation(fields: [carModelId], references: [id])
+  members          TaskMember[]
+  materials        TaskMaterial[]
+  statusLogs       TaskStatusLog[]
+  contentVersions  ContentVersion[]
+  reviews          TaskReview[]
+  notes            PublishedNote[]
+
+  @@map("content_tasks")
+}
+
+model TaskMember {
+  id        String   @id @default(uuid())
+  taskId    String
+  userId    String
+  role      String
+
+  task ContentTask @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  user User        @relation(fields: [userId], references: [id])
+
+  @@unique([taskId, userId, role])
+  @@map("task_members")
+}
+
+model TaskMaterial {
+  id         String @id @default(uuid())
+  taskId     String
+  materialId String
+
+  task     ContentTask @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  material Material    @relation(fields: [materialId], references: [id], onDelete: Cascade)
+
+  @@unique([taskId, materialId])
+  @@map("task_materials")
+}
+
+model TaskStatusLog {
+  id        String   @id @default(uuid())
+  taskId    String
+  fromStatus String?
+  toStatus  String
+  operatorId String
+  note      String?
+  createdAt DateTime @default(now())
+
+  task     ContentTask @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  operator User        @relation(fields: [operatorId], references: [id])
+
+  @@map("task_status_logs")
+}
+
+model ContentVersion {
+  id        String   @id @default(uuid())
+  taskId    String
+  version   Int
+  title     String?
+  content   String?
+  changedBy String
+  changeNote String?
+  createdAt DateTime @default(now())
+
+  task ContentTask @relation(fields: [taskId], references: [id], onDelete: Cascade)
+
+  @@unique([taskId, version])
+  @@map("content_versions")
+}
+
+model TaskReview {
+  id        String   @id @default(uuid())
+  taskId    String
+  reviewerId String
+  status    String
+  content   String?
+  createdAt DateTime @default(now())
+
+  task ContentTask @relation(fields: [taskId], references: [id], onDelete: Cascade)
+
+  @@map("task_reviews")
+}
+
+model SocialAccount {
+  id        String   @id @default(uuid())
+  name      String
+  platform  String   @default("XIAOHONGSHU")
+  createdAt DateTime @default(now())
+
+  notes PublishedNote[]
+
+  @@map("social_accounts")
+}
+
+model PublishedNote {
+  id             String   @id @default(uuid())
+  title          String
+  url            String?
+  accountId      String
+  publishedAt    DateTime?
+  contentType    String?
+  taskId         String?
+  ideaId         String?
+  productId      String?
+  carModelId     String?
+  fragranceId    String?
+  writerId       String?
+  designerId     String?
+  publisherId    String?
+  finalTitle     String?
+  finalContent   String?
+  finalCover     String?
+  usedMaterials  String[]
+  titleStructure String?
+  coverType      String?
+  isPaid         Boolean  @default(false)
+  paidAmount     Decimal? @db.Decimal(10, 2)
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  account   SocialAccount @relation(fields: [accountId], references: [id])
+  task      ContentTask?  @relation(fields: [taskId], references: [id])
+  idea      Idea?         @relation(fields: [ideaId], references: [id])
+  product   Product?      @relation(fields: [productId], references: [id])
+  carModel  CarModel?     @relation(fields: [carModelId], references: [id])
+  fragrance Fragrance?    @relation(fields: [fragranceId], references: [id])
+  metrics   NoteMetric[]
+
+  @@map("published_notes")
+}
+
+model NoteMetric {
+  id              String   @id @default(uuid())
+  noteId          String
+  recordedAt      DateTime @default(now())
+  views           Int      @default(0)
+  likes           Int      @default(0)
+  collects        Int      @default(0)
+  comments        Int      @default(0)
+  shares          Int      @default(0)
+  newFollowers    Int      @default(0)
+  profileVisits   Int      @default(0)
+ 私信数           Int      @default(0)
+  productClicks   Int      @default(0)
+  cartAdds        Int      @default(0)
+  orders          Int      @default(0)
+  orderAmount     Decimal? @db.Decimal(10, 2)
+  refunds         Int      @default(0)
+  paidAmount      Decimal? @db.Decimal(10, 2)
+  screenshot      String?
+  highFreqQuestions String?
+  userFeedback    String?
+  abnormalNote    String?
+
+  note PublishedNote @relation(fields: [noteId], references: [id], onDelete: Cascade)
+
+  @@map("note_metrics")
+}
+
+model Notification {
+  id        String   @id @default(uuid())
+  userId    String
+  type      String
+  title     String
+  content   String?
+  link      String?
+  isRead    Boolean  @default(false)
+  createdAt DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id])
+
+  @@map("notifications")
+}
+
+model OperationLog {
+  id        String   @id @default(uuid())
+  userId    String
+  action    String
+  entityType String?
+  entityId  String?
+  detail    String?
+  createdAt DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id])
+
+  @@map("operation_logs")
+}
