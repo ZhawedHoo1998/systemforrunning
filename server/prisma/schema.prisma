@@ -62,13 +62,14 @@ model Idea {
   updatedAt    DateTime @updatedAt
 
   creator      User          @relation(fields: [createdById], references: [id])
-  product      Product?      @relation(fields: [productId], references: [id})
-  carModel     CarModel?     @relation(fields: [carModelId], references: [id})
-  fragrance    Fragrance?    @relation(fields: [fragranceId], references: [id})
+  product      Product?      @relation(fields: [productId], references: [id])
+  carModel     CarModel?     @relation(fields: [carModelId], references: [id])
+  fragrance    Fragrance?    @relation(fields: [fragranceId], references: [id])
   comments     IdeaComment[]
   votes        IdeaVote[]
   attachments  IdeaAttachment[]
   tasks        ContentTask[]
+  publishedNotes PublishedNote[] @relation("IdeaPublishedNotes")
 
   @@map("ideas")
 }
@@ -136,6 +137,7 @@ model Product {
 
   carModels    ProductCarModel[]
   materials    MaterialProduct[]
+  primaryMaterials Material[] @relation("MaterialPrimaryProduct")
   ideas        Idea[]
   tasks        ContentTask[]
   notes        PublishedNote[]
@@ -169,6 +171,7 @@ model CarModel {
   brand        CarBrand @relation(fields: [brandId], references: [id])
   products     ProductCarModel[]
   materials    MaterialCarModel[]
+  primaryMaterials Material[] @relation("MaterialPrimaryCarModel")
   ideas        Idea[]
   tasks        ContentTask[]
   notes        PublishedNote[]
@@ -226,9 +229,9 @@ model Material {
   lastUsedAt   DateTime?
 
   uploadr      User?    @relation(fields: [uploadedById], references: [id])
-  product      Product? @relation(fields: [productId], references: [id])
-  carModel     CarModel? @relation(fields: [carModelId], references: [id])
-  fragrance    Fragrance? @relation(fields: [fragranceId], references: [id})
+  product      Product? @relation("MaterialPrimaryProduct", fields: [productId], references: [id])
+  carModel     CarModel? @relation("MaterialPrimaryCarModel", fields: [carModelId], references: [id])
+  fragrance    Fragrance? @relation(fields: [fragranceId], references: [id])
   tagsRelation MaterialTag[]
   productsRelation MaterialProduct[]
   carModelsRelation MaterialCarModel[]
@@ -310,7 +313,7 @@ model ContentTask {
   idea             Idea?        @relation(fields: [ideaId], references: [id])
   creator          User         @relation("TaskCreator", fields: [creatorId], references: [id])
   product          Product?     @relation(fields: [productId], references: [id])
-  carModel         CarModel?    @relation(fields: [carModelId], references: [id})
+  carModel         CarModel?    @relation(fields: [carModelId], references: [id])
   members          TaskMember[]
   materials        TaskMaterial[]
   statusLogs       TaskStatusLog[]
@@ -429,10 +432,10 @@ model PublishedNote {
 
   account   SocialAccount @relation(fields: [accountId], references: [id])
   task      ContentTask?  @relation(fields: [taskId], references: [id])
-  idea      Idea?         @relation(fields: [ideaId], references: [id])
+  idea      Idea?         @relation("IdeaPublishedNotes", fields: [ideaId], references: [id])
   product   Product?      @relation(fields: [productId], references: [id])
-  carModel  CarModel?     @relation(fields: [carModelId], references: [id})
-  fragrance Fragrance?    @relation(fields: [fragranceId], references: [id})
+  carModel  CarModel?     @relation(fields: [carModelId], references: [id])
+  fragrance Fragrance?    @relation(fields: [fragranceId], references: [id])
   metrics   NoteMetric[]
 
   @@map("published_notes")
@@ -490,7 +493,7 @@ model OperationLog {
   detail     String?
   createdAt  DateTime @default(now())
 
-  user User @relation(fields: [userId], references: [id})
+  user User @relation(fields: [userId], references: [id])
 
   @@map("operation_logs")
 }
