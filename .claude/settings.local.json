@@ -8,7 +8,19 @@
       "Read(//c/Program Files/**)",
       "Read(//c/Program Files \\(x86\\)/**)",
       "Bash(curl *)",
-      "Bash(npx prisma *)"
+      "Bash(npx prisma *)",
+      "Bash(npx create-next-app@latest . --typescript --tailwind --eslint --app --src-dir=false --import-alias=\"@/*\" --use-npm --yes)",
+      "Bash(npx shadcn@latest init -d --yes)",
+      "Bash(npx shadcn@4.14.0 init -d --yes)",
+      "Bash(npm install *)",
+      "Bash(npx shadcn@4.14.0 add button input label card dialog select badge separator tabs textarea dropdown-menu -d --yes)",
+      "Bash(npx shadcn@4.14.0 add button input label card dialog select badge separator tabs textarea dropdown-menu --yes)",
+      "Bash(npx tsc *)",
+      "Bash(npm run *)",
+      "Bash(docker --version)",
+      "Bash(docker compose *)",
+      "Bash(where docker *)",
+      "Bash(docker-compose up *)"
     ]
   }
 }
