@@ -92,3 +92,18 @@ class AiFeedback(Base):
     car_model = Column(String(200), nullable=True)
     prompt_version = Column(String(100), nullable=False)
     created_at = Column(DateTime, default=datetime.utcnow, index=True)
+
+
+class XiaohongshuShopConnection(Base):
+    __tablename__ = "xiaohongshu_shop_connections"
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    user_id = Column(String(36), ForeignKey("users.id"), nullable=False, index=True)
+    seller_id = Column(String(100), nullable=False, index=True)
+    seller_name = Column(String(300), nullable=True)
+    access_token = Column(Text, nullable=False)
+    access_token_expires_at = Column(DateTime, nullable=False, index=True)
+    refresh_token = Column(Text, nullable=False)
+    refresh_token_expires_at = Column(DateTime, nullable=False, index=True)
+    created_at = Column(DateTime, default=datetime.utcnow, index=True)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
