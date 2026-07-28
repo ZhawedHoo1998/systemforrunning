@@ -1,8 +1,9 @@
 "use client"
 
 import { useState } from "react"
-import { AlertCircle, CarFront, FileText, ImageIcon, Lightbulb, Video, X, ChevronRight, ChevronLeft, Upload, Plus, Trash2 } from "lucide-react"
-import type { Material, MaterialScope } from "@/lib/api"
+import Image from "next/image"
+import { AlertCircle, CarFront, CheckCircle2, Download, FileText, ImageIcon, Lightbulb, LoaderCircle, MessageCircle, Video, X, ChevronRight, ChevronLeft, Upload, Plus, Trash2 } from "lucide-react"
+import { importXiaohongshuMaterial, type Material, type MaterialScope, type MaterialSourceMetadata } from "@/lib/api"
 import { GENERAL_CONTENT_TYPES, isImageAttachment, isVideoAttachment, VEHICLE_CONTENT_TYPES } from "@/lib/materials"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
@@ -12,7 +13,6 @@ import { Textarea } from "@/components/ui/textarea"
 import { cn } from "@/lib/utils"
 
 const SOURCE_TYPES = [
-  { value: "ai_generated", label: "AI 生成" },
   { value: "self_experience", label: "自家经验" },
   { value: "product资料", label: "产品资料" },
   { value: "customer_feedback", label: "客户反馈" },
@@ -83,6 +83,10 @@ export function AddMaterialModal({
   const [tagInput, setTagInput] = useState("")
   const [files, setFiles] = useState<File[]>([])
   const [existingAttachments, setExistingAttachments] = useState(editingMaterial?.attachments ?? [])
+  const [sourceMetadata, setSourceMetadata] = useState<MaterialSourceMetadata | null>(editingMaterial?.source_metadata ?? null)
+  const [shareText, setShareText] = useState("")
+  const [importingXiaohongshu, setImportingXiaohongshu] = useState(false)
+  const [importWarnings, setImportWarnings] = useState<string[]>([])
   const [error, setError] = useState("")
   const availableContentTypes = materialScope === "general"
     ? GENERAL_CONTENT_TYPES
@@ -153,6 +157,33 @@ export function AddMaterialModal({
     setExistingAttachments((attachments) => attachments.filter((attachment) => attachment.path !== path))
   }
 
+  const handleImportXiaohongshu = async () => {
+    if (!shareText.trim()) {
+      setError("请先粘贴小红书分享链接或完整分享文案")
+      return
+    }
+
+    setImportingXiaohongshu(true)
+    setError("")
+    try {
+      const imported = await importXiaohongshuMaterial(shareText.trim())
+      setTitle(imported.title)
+      setAuthor(imported.author)
+      setSourceUrl(imported.source_url)
+      setSummary(imported.summary)
+      setOriginalContent(imported.content)
+      setExistingAttachments(imported.attachments)
+      setSourceMetadata(imported.source_metadata)
+      setTags((currentTags) => Array.from(new Set([...currentTags, ...imported.tags, "小红书"])))
+      setImportWarnings(imported.warnings)
+      setStep(3)
+    } catch (caughtError: unknown) {
+      setError(caughtError instanceof Error ? caughtError.message : "小红书内容获取失败，请重试")
+    } finally {
+      setImportingXiaohongshu(false)
+    }
+  }
+
   const handleSubmit = async () => {
     setSubmitting(true)
     setError("")
@@ -174,6 +205,7 @@ export function AddMaterialModal({
       if (learningPoints) formData.append("learning_points", learningPoints)
       if (suggestTitle) formData.append("suggest_title", suggestTitle)
       formData.append("tags", JSON.stringify(tags))
+      formData.append("source_metadata", JSON.stringify(sourceMetadata ?? {}))
       formData.append("attachments", JSON.stringify(existingAttachments))
       files.forEach((f) => formData.append("files", f))
 
@@ -278,6 +310,41 @@ export function AddMaterialModal({
                   </button>
                 ))}
               </div>
+
+              {sourceType === "xiaohongshu" && (
+                <div className="rounded-md border border-[#e4c7d0] bg-[#fff8fa] p-4">
+                  <div className="flex items-start gap-3">
+                    <div className="grid size-9 shrink-0 place-items-center rounded-md bg-primary/10 text-primary">
+                      <Download className="size-4" />
+                    </div>
+                    <div className="min-w-0 flex-1">
+                      <h4 className="text-sm font-semibold">自动导入小红书内容</h4>
+                      <p className="mt-1 text-xs leading-5 text-muted-foreground">
+                        粘贴分享链接或完整分享文案，系统会获取标题、正文、图片和按点赞数排序的前 10 条评论。
+                      </p>
+                    </div>
+                  </div>
+                  <Textarea
+                    value={shareText}
+                    onChange={(event) => setShareText(event.target.value)}
+                    placeholder="粘贴小红书分享文案，例如：标题 + 内容 + https://www.xiaohongshu.com/..."
+                    className="mt-3 min-h-24 bg-background"
+                    rows={3}
+                  />
+                  <div className="mt-3 flex items-center justify-between gap-3">
+                    <span className="text-xs text-muted-foreground">未登录或触发风控时会显示具体处理提示</span>
+                    <Button
+                      type="button"
+                      onClick={handleImportXiaohongshu}
+                      disabled={importingXiaohongshu || shareText.trim().length < 5}
+                      className="gap-2"
+                    >
+                      {importingXiaohongshu ? <LoaderCircle className="size-4 animate-spin" /> : <Download className="size-4" />}
+                      {importingXiaohongshu ? "获取中..." : "自动获取"}
+                    </Button>
+                  </div>
+                </div>
+              )}
             </div>
           )}
 
@@ -371,6 +438,33 @@ export function AddMaterialModal({
                     rows={4}
                   />
                 </div>
+                {sourceMetadata?.platform === "xiaohongshu" && (
+                  <div className="rounded-md border bg-muted/30 p-3">
+                    <div className="flex items-center gap-2 text-sm font-semibold">
+                      <CheckCircle2 className="size-4 text-insight-foreground" />
+                      已导入小红书数据
+                    </div>
+                    <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-xs text-muted-foreground">
+                      <span>{sourceMetadata.image_count ?? existingAttachments.filter(isImageAttachment).length} 张图片</span>
+                      <span>{sourceMetadata.top_comments?.length ?? 0} 条热门评论</span>
+                      <span>可继续编辑后保存</span>
+                    </div>
+                    {sourceMetadata.top_comments && sourceMetadata.top_comments.length > 0 && (
+                      <div className="mt-3 space-y-2 border-t pt-3">
+                        {sourceMetadata.top_comments.slice(0, 3).map((comment) => (
+                          <div key={comment.id} className="flex gap-2 text-xs leading-5">
+                            <MessageCircle className="mt-0.5 size-3.5 shrink-0 text-muted-foreground" />
+                            <p className="min-w-0 flex-1"><span className="font-medium">{comment.author}：</span>{comment.content}</p>
+                            <span className="shrink-0 text-muted-foreground">赞 {comment.likes}</span>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                    {importWarnings.length > 0 && (
+                      <p className="mt-2 text-xs text-amber-700">{importWarnings.join("；")}</p>
+                    )}
+                  </div>
+                )}
               </div>
             </div>
           )}
@@ -525,6 +619,22 @@ export function AddMaterialModal({
                           </Button>
                         </div>
                       ))}
+                      {existingAttachments.some(isImageAttachment) && (
+                        <div className="grid grid-cols-3 gap-2 pt-2">
+                          {existingAttachments.filter(isImageAttachment).map((attachment, index) => (
+                            <div key={`preview-${attachment.path}`} className="relative aspect-[4/3] overflow-hidden rounded-md border bg-muted">
+                              <Image
+                                src={attachment.path}
+                                alt={attachment.name || `附件图片 ${index + 1}`}
+                                fill
+                                sizes="160px"
+                                className="object-cover"
+                                unoptimized
+                              />
+                            </div>
+                          ))}
+                        </div>
+                      )}
                     </div>
                   )}
                 </div>

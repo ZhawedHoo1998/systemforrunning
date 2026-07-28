@@ -2,6 +2,27 @@ const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"
 
 export type MaterialScope = "vehicle" | "general"
 
+export class ApiError extends Error {
+  status: number
+
+  constructor(message: string, status: number) {
+    super(message)
+    this.name = "ApiError"
+    this.status = status
+  }
+}
+
+async function apiFetch(input: RequestInfo | URL, init: RequestInit = {}) {
+  const response = await fetch(input, {
+    ...init,
+    credentials: "include",
+  })
+  if (response.status === 401 && typeof window !== "undefined") {
+    window.dispatchEvent(new Event("ruby-rain:unauthorized"))
+  }
+  return response
+}
+
 async function throwApiError(response: Response, fallback: string): Promise<never> {
   let message = fallback
 
@@ -12,7 +33,90 @@ async function throwApiError(response: Response, fallback: string): Promise<neve
     // Some endpoints can return an empty or non-JSON error response.
   }
 
-  throw new Error(message)
+  throw new ApiError(message, response.status)
+}
+
+export interface User {
+  id: string
+  username: string
+  display_name: string
+  role: "admin" | "writer"
+  is_active: boolean
+  created_at: string
+  updated_at: string
+}
+
+export interface UserCreatePayload {
+  username: string
+  display_name: string
+  password: string
+  role: User["role"]
+}
+
+export interface UserUpdatePayload {
+  display_name?: string
+  password?: string
+  role?: User["role"]
+  is_active?: boolean
+}
+
+export async function login(username: string, password: string): Promise<User> {
+  const res = await apiFetch(`${API_BASE}/api/auth/login`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ username, password }),
+  })
+  if (!res.ok) await throwApiError(res, "登录失败")
+  return res.json()
+}
+
+export async function logout(): Promise<void> {
+  const res = await apiFetch(`${API_BASE}/api/auth/logout`, { method: "POST" })
+  if (!res.ok) await throwApiError(res, "退出登录失败")
+}
+
+export async function getCurrentUser(): Promise<User> {
+  const res = await apiFetch(`${API_BASE}/api/auth/me`)
+  if (!res.ok) await throwApiError(res, "登录状态获取失败")
+  return res.json()
+}
+
+export async function changePassword(currentPassword: string, newPassword: string): Promise<void> {
+  const res = await apiFetch(`${API_BASE}/api/auth/password`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      current_password: currentPassword,
+      new_password: newPassword,
+    }),
+  })
+  if (!res.ok) await throwApiError(res, "密码修改失败")
+}
+
+export async function getUsers(): Promise<User[]> {
+  const res = await apiFetch(`${API_BASE}/api/users`)
+  if (!res.ok) await throwApiError(res, "用户列表加载失败")
+  return res.json()
+}
+
+export async function createUser(payload: UserCreatePayload): Promise<User> {
+  const res = await apiFetch(`${API_BASE}/api/users`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  })
+  if (!res.ok) await throwApiError(res, "创建用户失败")
+  return res.json()
+}
+
+export async function updateUser(id: string, payload: UserUpdatePayload): Promise<User> {
+  const res = await apiFetch(`${API_BASE}/api/users/${id}`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  })
+  if (!res.ok) await throwApiError(res, "用户更新失败")
+  return res.json()
 }
 
 export interface Material {
@@ -33,10 +137,45 @@ export interface Material {
   suggest_title: string | null
   tags: string[]
   attachments: Attachment[]
-  ai_conversation: AiConversation | null
+  source_metadata: MaterialSourceMetadata | null
   is_favorite: boolean
   created_at: string
   updated_at: string
+}
+
+export interface MaterialSourceMetadata {
+  platform?: string
+  note_id?: string
+  author_id?: string
+  share_text?: string
+  resolved_url?: string
+  image_count?: number
+  imported_at?: string
+  metrics?: {
+    likes?: number
+    collections?: number
+    comments?: number
+    shares?: number
+  }
+  top_comments?: Array<{
+    id: string
+    author: string
+    content: string
+    likes: number
+    reply_count: number
+  }>
+}
+
+export interface XiaohongshuImportResult {
+  title: string
+  content: string
+  summary: string
+  author: string
+  source_url: string
+  tags: string[]
+  attachments: Attachment[]
+  source_metadata: MaterialSourceMetadata
+  warnings: string[]
 }
 
 export interface Attachment {
@@ -48,6 +187,25 @@ export interface Attachment {
 
 export interface MaterialsResponse {
   items: Material[]
+  total: number
+  page: number
+  page_size: number
+}
+
+export interface Creation {
+  id: string
+  title: string
+  summary: string | null
+  original_content: string | null
+  tags: string[]
+  attachments: Attachment[]
+  ai_conversation: AiConversation
+  created_at: string
+  updated_at: string
+}
+
+export interface CreationsResponse {
+  items: Creation[]
   total: number
   page: number
   page_size: number
@@ -79,6 +237,14 @@ export interface AiMessage {
   content: string
 }
 
+export interface AiImageMessage {
+  id: string
+  role: "user" | "assistant"
+  content: string
+  reference?: Attachment
+  image?: Attachment
+}
+
 export interface AiConversation {
   version: 1
   task: AiTask
@@ -90,7 +256,9 @@ export interface AiConversation {
   car_model: string | null
   image_prompt: string
   generated_images: Attachment[]
+  image_messages?: AiImageMessage[]
   reference_image_attachment?: Attachment | null
+  active_reference_attachment?: Attachment | null
   prompt_version: string | null
   saved_at: string
 }
@@ -115,9 +283,16 @@ export interface AiChatRequest {
 export interface AiImageRequest {
   prompt: string
   reference_image: File
+  reference_attachment?: Attachment | null
+  history?: string[]
   brand?: string
   car_model?: string
   material_ids: string[]
+}
+
+export interface AiImageResult {
+  attachment: Attachment
+  reference_attachment: Attachment
 }
 
 export interface AiFeedbackRequest {
@@ -157,19 +332,65 @@ export async function getMaterials(params: {
   if (params.page) sp.set("page", String(params.page))
   if (params.page_size) sp.set("page_size", String(params.page_size))
 
-  const res = await fetch(`${API_BASE}/api/materials?${sp.toString()}`)
+  const res = await apiFetch(`${API_BASE}/api/materials?${sp.toString()}`)
   if (!res.ok) await throwApiError(res, "素材加载失败，请稍后重试")
   return res.json()
 }
 
 export async function getMaterial(id: string): Promise<Material> {
-  const res = await fetch(`${API_BASE}/api/materials/${id}`)
+  const res = await apiFetch(`${API_BASE}/api/materials/${id}`)
   if (!res.ok) await throwApiError(res, "素材详情加载失败")
   return res.json()
 }
 
+export async function getCreations(params: {
+  q?: string
+  page?: number
+  page_size?: number
+} = {}): Promise<CreationsResponse> {
+  const sp = new URLSearchParams()
+  if (params.q) sp.set("q", params.q)
+  if (params.page) sp.set("page", String(params.page))
+  if (params.page_size) sp.set("page_size", String(params.page_size))
+
+  const res = await apiFetch(`${API_BASE}/api/creations?${sp.toString()}`)
+  if (!res.ok) await throwApiError(res, "我的创作加载失败，请稍后重试")
+  return res.json()
+}
+
+export async function getCreation(id: string): Promise<Creation> {
+  const res = await apiFetch(`${API_BASE}/api/creations/${id}`)
+  if (!res.ok) await throwApiError(res, "创作记录加载失败")
+  return res.json()
+}
+
+export async function createCreation(formData: FormData): Promise<Creation> {
+  const res = await apiFetch(`${API_BASE}/api/creations`, {
+    method: "POST",
+    body: formData,
+  })
+  if (!res.ok) await throwApiError(res, "保存创作失败，请稍后重试")
+  return res.json()
+}
+
+export async function updateCreation(id: string, formData: FormData): Promise<Creation> {
+  const res = await apiFetch(`${API_BASE}/api/creations/${id}`, {
+    method: "PUT",
+    body: formData,
+  })
+  if (!res.ok) await throwApiError(res, "更新创作失败，请稍后重试")
+  return res.json()
+}
+
+export async function deleteCreation(id: string): Promise<void> {
+  const res = await apiFetch(`${API_BASE}/api/creations/${id}`, {
+    method: "DELETE",
+  })
+  if (!res.ok) await throwApiError(res, "删除创作失败")
+}
+
 export async function createMaterial(formData: FormData): Promise<Material> {
-  const res = await fetch(`${API_BASE}/api/materials`, {
+  const res = await apiFetch(`${API_BASE}/api/materials`, {
     method: "POST",
     body: formData,
   })
@@ -177,8 +398,18 @@ export async function createMaterial(formData: FormData): Promise<Material> {
   return res.json()
 }
 
+export async function importXiaohongshuMaterial(shareText: string): Promise<XiaohongshuImportResult> {
+  const res = await apiFetch(`${API_BASE}/api/import/xiaohongshu`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ share_text: shareText }),
+  })
+  if (!res.ok) await throwApiError(res, "小红书内容获取失败")
+  return res.json()
+}
+
 export async function updateMaterial(id: string, formData: FormData): Promise<Material> {
-  const res = await fetch(`${API_BASE}/api/materials/${id}`, {
+  const res = await apiFetch(`${API_BASE}/api/materials/${id}`, {
     method: "PUT",
     body: formData,
   })
@@ -187,14 +418,14 @@ export async function updateMaterial(id: string, formData: FormData): Promise<Ma
 }
 
 export async function deleteMaterial(id: string): Promise<void> {
-  const res = await fetch(`${API_BASE}/api/materials/${id}`, {
+  const res = await apiFetch(`${API_BASE}/api/materials/${id}`, {
     method: "DELETE",
   })
   if (!res.ok) await throwApiError(res, "删除素材失败")
 }
 
 export async function toggleFavorite(id: string): Promise<Material> {
-  const res = await fetch(`${API_BASE}/api/materials/${id}/favorite`, {
+  const res = await apiFetch(`${API_BASE}/api/materials/${id}/favorite`, {
     method: "POST",
   })
   if (!res.ok) await throwApiError(res, "收藏状态更新失败")
@@ -202,19 +433,19 @@ export async function toggleFavorite(id: string): Promise<Material> {
 }
 
 export async function getFavorites(page = 1, pageSize = 20): Promise<MaterialsResponse> {
-  const res = await fetch(`${API_BASE}/api/materials/favorites?page=${page}&page_size=${pageSize}`)
+  const res = await apiFetch(`${API_BASE}/api/materials/favorites?page=${page}&page_size=${pageSize}`)
   if (!res.ok) await throwApiError(res, "收藏素材加载失败")
   return res.json()
 }
 
 export async function getRecent(limit = 30): Promise<Material[]> {
-  const res = await fetch(`${API_BASE}/api/materials/recent?limit=${limit}`)
+  const res = await apiFetch(`${API_BASE}/api/materials/recent?limit=${limit}`)
   if (!res.ok) await throwApiError(res, "最近素材加载失败")
   return res.json()
 }
 
 export async function getOptions(): Promise<Options> {
-  const res = await fetch(`${API_BASE}/api/materials/options`)
+  const res = await apiFetch(`${API_BASE}/api/materials/options`)
   if (!res.ok) await throwApiError(res, "筛选项加载失败")
   return res.json()
 }
@@ -228,13 +459,13 @@ export async function getMaterialFacets(params: {
   if (params.brand) sp.set("brand", params.brand)
   if (params.car_model) sp.set("car_model", params.car_model)
 
-  const res = await fetch(`${API_BASE}/api/materials/facets?${sp.toString()}`)
+  const res = await apiFetch(`${API_BASE}/api/materials/facets?${sp.toString()}`)
   if (!res.ok) await throwApiError(res, "素材分类统计加载失败")
   return res.json()
 }
 
 export async function getAiStatus(): Promise<AiStatus> {
-  const res = await fetch(`${API_BASE}/api/ai/status`)
+  const res = await apiFetch(`${API_BASE}/api/ai/status`)
   if (!res.ok) await throwApiError(res, "AI 配置状态加载失败")
   return res.json()
 }
@@ -243,7 +474,7 @@ export async function streamAiChat(
   payload: AiChatRequest,
   onDelta: (delta: string) => void,
 ): Promise<void> {
-  const res = await fetch(`${API_BASE}/api/ai/chat`, {
+  const res = await apiFetch(`${API_BASE}/api/ai/chat`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload),
@@ -276,25 +507,28 @@ export async function streamAiChat(
   }
 }
 
-export async function generateAiImage(payload: AiImageRequest): Promise<Attachment> {
+export async function generateAiImage(payload: AiImageRequest): Promise<AiImageResult> {
   const formData = new FormData()
   formData.append("prompt", payload.prompt)
   formData.append("reference_image", payload.reference_image)
   formData.append("material_ids", JSON.stringify(payload.material_ids))
+  formData.append("image_history", JSON.stringify(payload.history || []))
+  if (payload.reference_attachment) {
+    formData.append("reference_attachment", JSON.stringify(payload.reference_attachment))
+  }
   if (payload.brand) formData.append("brand", payload.brand)
   if (payload.car_model) formData.append("car_model", payload.car_model)
 
-  const res = await fetch(`${API_BASE}/api/ai/images`, {
+  const res = await apiFetch(`${API_BASE}/api/ai/images`, {
     method: "POST",
     body: formData,
   })
   if (!res.ok) await throwApiError(res, "AI 图片生成失败")
-  const result = await res.json() as { attachment: Attachment }
-  return result.attachment
+  return res.json()
 }
 
 export async function submitAiFeedback(payload: AiFeedbackRequest): Promise<void> {
-  const res = await fetch(`${API_BASE}/api/ai/feedback`, {
+  const res = await apiFetch(`${API_BASE}/api/ai/feedback`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload),

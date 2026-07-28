@@ -1,16 +1,15 @@
 "use client"
 
 import { FormEvent, useDeferredValue, useEffect, useMemo, useState } from "react"
-import Image from "next/image"
 import Link from "next/link"
 import {
   AlertCircle,
   CheckCircle2,
   Clapperboard,
   FileText,
-  ImagePlus,
   History,
   LoaderCircle,
+  Maximize2,
   RefreshCw,
   Save,
   Search,
@@ -20,9 +19,10 @@ import {
   ThumbsUp,
   Trash2,
   Type,
-  Upload,
   X,
 } from "lucide-react"
+import { AiImageWorkspace } from "@/components/AiImageWorkspace"
+import { AiMarkdown } from "@/components/AiMarkdown"
 import { Header } from "@/components/Header"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
@@ -37,16 +37,25 @@ import {
 } from "@/components/ui/select"
 import { Textarea } from "@/components/ui/textarea"
 import {
-  createMaterial,
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogTitle,
+} from "@/components/ui/dialog"
+import {
+  createCreation,
   generateAiImage,
   getAiStatus,
+  getCreation,
   getMaterial,
   getMaterials,
   getOptions,
   streamAiChat,
   submitAiFeedback,
-  updateMaterial,
+  updateCreation,
+  type Creation,
   type AiMessage,
+  type AiImageMessage,
   type AiStatus,
   type AiTask,
   type Attachment,
@@ -54,6 +63,7 @@ import {
   type MaterialScope,
   type VehicleOption,
 } from "@/lib/api"
+import { isImageAttachment } from "@/lib/materials"
 import { cn } from "@/lib/utils"
 
 const TASKS = [
@@ -78,6 +88,17 @@ function deriveTitle(content: string, carModel: string) {
   return (firstLine || (carModel ? `${carModel} 笔记灵感` : "新笔记灵感")).slice(0, 60)
 }
 
+async function attachmentToFile(attachment: Attachment) {
+  const response = await fetch(attachment.path)
+  if (!response.ok) throw new Error("参考图加载失败")
+  const blob = await response.blob()
+  return new File(
+    [blob],
+    attachment.name || "参考图.png",
+    { type: attachment.type || blob.type || "image/png" }
+  )
+}
+
 export default function AiStudioPage() {
   const [status, setStatus] = useState<AiStatus | null>(null)
   const [vehicles, setVehicles] = useState<VehicleOption[]>([])
@@ -99,15 +120,18 @@ export default function AiStudioPage() {
   const [referenceAttachment, setReferenceAttachment] = useState<Attachment | null>(null)
   const [generatingImage, setGeneratingImage] = useState(false)
   const [generatedImages, setGeneratedImages] = useState<Attachment[]>([])
+  const [imageMessages, setImageMessages] = useState<AiImageMessage[]>([])
+  const [loadingReferencePath, setLoadingReferencePath] = useState("")
   const [noteTitle, setNoteTitle] = useState("")
   const [saving, setSaving] = useState(false)
-  const [savedMaterial, setSavedMaterial] = useState<Material | null>(null)
-  const [resumedMaterialId, setResumedMaterialId] = useState<string | null>(null)
+  const [savedCreation, setSavedCreation] = useState<Creation | null>(null)
+  const [resumedCreationId, setResumedCreationId] = useState<string | null>(null)
   const [resumedTitle, setResumedTitle] = useState("")
   const [feedbackChoice, setFeedbackChoice] = useState<"helpful" | "unhelpful" | null>(null)
   const [feedbackComment, setFeedbackComment] = useState("")
   const [feedbackSaving, setFeedbackSaving] = useState(false)
   const [feedbackSent, setFeedbackSent] = useState(false)
+  const [textWorkspaceOpen, setTextWorkspaceOpen] = useState(false)
   const deferredSearch = useDeferredValue(materialSearch)
 
   useEffect(() => {
@@ -127,14 +151,13 @@ export default function AiStudioPage() {
   }, [])
 
   useEffect(() => {
-    const materialId = new URLSearchParams(window.location.search).get("resume")
-    if (!materialId) return
+    const creationId = new URLSearchParams(window.location.search).get("resume")
+    if (!creationId) return
 
     let active = true
-    getMaterial(materialId)
-      .then(async (material) => {
-        const conversation = material.ai_conversation
-        if (!conversation) throw new Error("这条笔记灵感没有可恢复的 AI 会话")
+    getCreation(creationId)
+      .then(async (creation) => {
+        const conversation = creation.ai_conversation
 
         const selectedResults = await Promise.allSettled(
           conversation.selected_material_ids.map((id) => getMaterial(id))
@@ -145,25 +168,18 @@ export default function AiStudioPage() {
 
         let restoredReference: File | null = null
         const referenceAttachment = conversation.reference_image_attachment ?? null
-        if (referenceAttachment) {
+        const activeReferenceAttachment = conversation.active_reference_attachment ?? referenceAttachment
+        if (activeReferenceAttachment) {
           try {
-            const response = await fetch(referenceAttachment.path)
-            if (response.ok) {
-              const blob = await response.blob()
-              restoredReference = new File(
-                [blob],
-                referenceAttachment.name || "参考图.png",
-                { type: referenceAttachment.type || blob.type }
-              )
-            }
+            restoredReference = await attachmentToFile(activeReferenceAttachment)
           } catch {
             restoredReference = null
           }
         }
 
         if (!active) return
-        setResumedMaterialId(material.id)
-        setResumedTitle(material.title)
+        setResumedCreationId(creation.id)
+        setResumedTitle(creation.title)
         setTask(conversation.task)
         setMessages(conversation.messages)
         setSelectedMaterials(restoredMaterials)
@@ -173,11 +189,17 @@ export default function AiStudioPage() {
         setSelectedCarModel(conversation.car_model || "")
         setImagePrompt(conversation.image_prompt || "")
         setGeneratedImages(conversation.generated_images || [])
-        setReferenceAttachment(referenceAttachment)
+        setImageMessages(conversation.image_messages || (conversation.generated_images || []).map((image, index) => ({
+          id: `restored-image-${index}`,
+          role: "assistant" as const,
+          content: `历史生成结果 ${index + 1}`,
+          image,
+        })))
+        setReferenceAttachment(activeReferenceAttachment)
         setReferenceImage(restoredReference)
-        setReferencePreview(restoredReference ? URL.createObjectURL(restoredReference) : "")
-        setNoteTitle(material.title)
-        setSavedMaterial(null)
+        setReferencePreview(restoredReference && activeReferenceAttachment ? activeReferenceAttachment.path : "")
+        setNoteTitle(creation.title)
+        setSavedCreation(null)
       })
       .catch((error) => {
         if (active) setChatError(error instanceof Error ? error.message : "AI 会话恢复失败")
@@ -218,7 +240,7 @@ export default function AiStudioPage() {
   }, [deferredSearch, scopeFilter, selectedBrand, selectedCarModel])
 
   useEffect(() => () => {
-    if (referencePreview) URL.revokeObjectURL(referencePreview)
+    if (referencePreview.startsWith("blob:")) URL.revokeObjectURL(referencePreview)
   }, [referencePreview])
 
   const brands = useMemo(
@@ -235,6 +257,17 @@ export default function AiStudioPage() {
     () => selectedMaterials.map((material) => material.id),
     [selectedMaterials]
   )
+  const selectedMaterialImages = useMemo(() => {
+    const seen = new Set<string>()
+    return selectedMaterials.flatMap((material) => material.attachments
+      .filter(isImageAttachment)
+      .filter((attachment) => {
+        if (seen.has(attachment.path)) return false
+        seen.add(attachment.path)
+        return true
+      })
+      .map((attachment) => ({ attachment, materialTitle: material.title })))
+  }, [selectedMaterials])
   const latestAssistant = useMemo(
     () => messages.slice().reverse().find((message) => message.role === "assistant" && message.content)?.content ?? "",
     [messages]
@@ -246,6 +279,8 @@ export default function AiStudioPage() {
   const selectedTask = TASKS.find((item) => item.value === task) ?? TASKS[0]
   const chatReady = Boolean(status?.chat_configured)
   const imageReady = Boolean(status?.image_configured)
+  const hasImageResults = imageMessages.some((message) => message.role === "assistant" && message.image)
+  const canSaveIdea = Boolean(latestAssistant || hasImageResults)
 
   const toggleMaterial = (material: Material) => {
     setSelectedMaterials((current) =>
@@ -270,6 +305,21 @@ export default function AiStudioPage() {
     setReferencePreview(file ? URL.createObjectURL(file) : "")
   }
 
+  const selectReferenceAttachment = async (attachment: Attachment) => {
+    setLoadingReferencePath(attachment.path)
+    setChatError("")
+    try {
+      const file = await attachmentToFile(attachment)
+      setReferenceAttachment(attachment)
+      setReferenceImage(file)
+      setReferencePreview(attachment.path)
+    } catch (error) {
+      setChatError(error instanceof Error ? error.message : "参考图加载失败")
+    } finally {
+      setLoadingReferencePath("")
+    }
+  }
+
   const handleSend = async (event: FormEvent) => {
     event.preventDefault()
     const content = input.trim()
@@ -280,7 +330,7 @@ export default function AiStudioPage() {
     setMessages([...nextMessages, { role: "assistant", content: "" }])
     setInput("")
     setChatError("")
-    setSavedMaterial(null)
+    setSavedCreation(null)
     setFeedbackChoice(null)
     setFeedbackComment("")
     setFeedbackSent(false)
@@ -317,18 +367,51 @@ export default function AiStudioPage() {
   const handleGenerateImage = async () => {
     const prompt = imagePrompt.trim()
     if (!prompt || !referenceImage || !imageReady || generatingImage) return
+    const userMessage: AiImageMessage = {
+      id: crypto.randomUUID(),
+      role: "user",
+      content: prompt,
+    }
+    setImageMessages((current) => [...current, userMessage])
     setGeneratingImage(true)
     setChatError("")
+    setSavedCreation(null)
     try {
-      const attachment = await generateAiImage({
+      const result = await generateAiImage({
         prompt,
         reference_image: referenceImage,
+        reference_attachment: referenceAttachment,
+        history: imageMessages
+          .filter((message) => message.role === "user")
+          .map((message) => message.content),
         brand: selectedBrand,
         car_model: selectedCarModel,
         material_ids: selectedMaterialIds,
       })
+      const attachment = result.attachment
       setGeneratedImages((current) => [...current, attachment])
+      setImageMessages((current) => [
+        ...current.map((message) => message.id === userMessage.id
+          ? { ...message, reference: result.reference_attachment }
+          : message),
+        {
+          id: crypto.randomUUID(),
+          role: "assistant",
+          content: `已生成第 ${current.filter((message) => message.role === "assistant" && message.image).length + 1} 版`,
+          image: attachment,
+        },
+      ])
+      setImagePrompt("")
+      try {
+        const nextReference = await attachmentToFile(attachment)
+        setReferenceAttachment(attachment)
+        setReferenceImage(nextReference)
+        setReferencePreview(attachment.path)
+      } catch {
+        setChatError("图片已生成，但暂时无法载入为下一轮参考图")
+      }
     } catch (error) {
+      setImageMessages((current) => current.filter((message) => message.id !== userMessage.id))
       setChatError(error instanceof Error ? error.message : "AI 图片生成失败")
     } finally {
       setGeneratingImage(false)
@@ -359,8 +442,13 @@ export default function AiStudioPage() {
   }
 
   const handleSave = async () => {
-    if (!latestAssistant || saving) return
-    const title = noteTitle.trim() || deriveTitle(latestAssistant, selectedCarModel)
+    if (!canSaveIdea || saving) return
+    const imageRequirements = imageMessages
+      .filter((message) => message.role === "user")
+      .map((message) => message.content)
+      .join("\n")
+    const savedContent = latestAssistant || imageRequirements || "图片创作灵感"
+    const title = noteTitle.trim() || deriveTitle(savedContent, selectedCarModel)
     const conversation = {
       version: 1 as const,
       task,
@@ -372,22 +460,25 @@ export default function AiStudioPage() {
       car_model: selectedCarModel || null,
       image_prompt: imagePrompt,
       generated_images: generatedImages,
+      image_messages: imageMessages,
       reference_image_attachment: referenceAttachment,
+      active_reference_attachment: referenceAttachment,
       prompt_version: status?.prompt_version ?? null,
       saved_at: new Date().toISOString(),
     }
-    const retainedAttachments = [
+    const conversationAttachments = imageMessages.flatMap((message) => [
+      ...(message.reference ? [message.reference] : []),
+      ...(message.image ? [message.image] : []),
+    ])
+    const retainedAttachments = Array.from(new Map([
       ...generatedImages,
+      ...conversationAttachments,
       ...(referenceAttachment ? [referenceAttachment] : []),
-    ]
+    ].map((attachment) => [attachment.path, attachment])).values())
     const formData = new FormData()
     formData.append("title", title)
-    formData.append("material_scope", "general")
-    formData.append("source_type", "ai_generated")
-    formData.append("content_types", JSON.stringify(["笔记灵感"]))
-    formData.append("summary", latestAssistant.slice(0, 500))
-    formData.append("original_content", latestAssistant)
-    formData.append("save_reason", `AI 创作台基于 ${selectedMaterialIds.length} 条参考素材生成`)
+    formData.append("summary", savedContent.slice(0, 500))
+    formData.append("original_content", latestAssistant || imageRequirements)
     formData.append("tags", JSON.stringify([
       "AI生成",
       selectedBrand,
@@ -403,13 +494,17 @@ export default function AiStudioPage() {
     setSaving(true)
     setChatError("")
     try {
-      const saved = resumedMaterialId
-        ? await updateMaterial(resumedMaterialId, formData)
-        : await createMaterial(formData)
-      setSavedMaterial(saved)
-      setResumedMaterialId(saved.id)
+      const saved = resumedCreationId
+        ? await updateCreation(resumedCreationId, formData)
+        : await createCreation(formData)
+      setSavedCreation(saved)
+      setResumedCreationId(saved.id)
       setResumedTitle(saved.title)
-      setReferenceAttachment(saved.ai_conversation?.reference_image_attachment ?? null)
+      const savedReference = saved.ai_conversation?.active_reference_attachment
+        ?? saved.ai_conversation?.reference_image_attachment
+        ?? null
+      setReferenceAttachment(savedReference)
+      if (savedReference) setReferencePreview(savedReference.path)
       setNoteTitle(title)
       window.history.replaceState({}, "", `/ai?resume=${saved.id}`)
     } catch (error) {
@@ -418,6 +513,190 @@ export default function AiStudioPage() {
       setSaving(false)
     }
   }
+
+  const renderConversation = (expanded = false) => (
+    <div className="flex min-h-0 flex-1 flex-col">
+      {expanded && (
+        <div className="flex min-h-14 items-center gap-2 border-b px-5 py-3 pr-12 sm:px-6">
+          <Sparkles className="size-4 shrink-0 text-primary" />
+          <div className="min-w-0">
+            <h2 className="text-sm font-semibold">专注 AI 对话</h2>
+            <p className="truncate text-xs text-muted-foreground">
+              {selectedMaterialIds.length} 条参考素材{selectedCarModel ? ` · ${selectedCarModel}` : ""}
+            </p>
+          </div>
+        </div>
+      )}
+
+      <div className={cn("border-b p-3", expanded && "px-5 py-3 sm:px-6")}>
+        <div className="flex items-start gap-2">
+          <div className="grid min-w-0 flex-1 grid-cols-2 gap-1 sm:grid-cols-3 lg:flex" role="tablist" aria-label="创作任务">
+            {TASKS.map(({ value, label, icon: Icon }) => (
+              <button
+                key={value}
+                type="button"
+                role="tab"
+                aria-selected={task === value}
+                onClick={() => setTask(value)}
+                className={cn(
+                  "flex h-9 min-w-0 items-center justify-center gap-1.5 rounded-md px-3 text-xs font-medium text-muted-foreground transition-colors last:col-span-2 sm:last:col-span-1",
+                  task === value && "bg-accent text-accent-foreground"
+                )}
+              >
+                <Icon className="size-3.5 shrink-0" />
+                <span className="truncate">{label}</span>
+              </button>
+            ))}
+          </div>
+          {!expanded && (
+            <Button
+              type="button"
+              variant="ghost"
+              size="icon"
+              className="size-9 shrink-0"
+              onClick={() => setTextWorkspaceOpen(true)}
+              aria-label="打开专注对话"
+              title="打开专注对话"
+            >
+              <Maximize2 className="size-4" />
+            </Button>
+          )}
+        </div>
+      </div>
+
+      <div className="flex min-h-0 flex-1 flex-col">
+        <div className={cn("flex-1 space-y-5 overflow-y-auto", expanded ? "p-5 sm:p-7" : "p-4 sm:p-5")}>
+          {messages.length === 0 ? (
+            <div className="flex min-h-full flex-col items-center justify-center px-6 text-center">
+              <span className="mb-4 grid size-11 place-items-center rounded-full bg-accent text-primary">
+                <Sparkles className="size-5" />
+              </span>
+              <h2 className="text-sm font-semibold">{selectedTask.label}</h2>
+              <p className="mt-1 max-w-sm text-xs leading-5 text-muted-foreground">描述你想写的内容、场景或表达方向</p>
+            </div>
+          ) : messages.map((message, index) => (
+            <div
+              key={`${message.role}-${index}`}
+              className={cn("flex", message.role === "user" ? "justify-end" : "justify-start")}
+            >
+              <div className={cn(
+                "min-w-0 break-words rounded-lg px-4 py-3.5",
+                message.role === "user"
+                  ? "max-w-[84%] whitespace-pre-wrap bg-primary text-[15px] leading-7 text-primary-foreground"
+                  : cn(
+                    expanded ? "max-w-[min(980px,94%)] shadow-sm" : "max-w-[96%]",
+                    "border bg-background text-foreground"
+                  )
+              )}>
+                {message.content ? message.role === "assistant" ? (
+                  <>
+                    <div className="mb-2 flex items-center gap-1.5 text-xs font-medium text-primary">
+                      <Sparkles className="size-3.5" />
+                      AI 助手
+                    </div>
+                    <AiMarkdown>{message.content}</AiMarkdown>
+                  </>
+                ) : message.content : (
+                  <span className="flex items-center gap-2 text-muted-foreground">
+                    <LoaderCircle className="size-4 animate-spin" />
+                    正在生成
+                  </span>
+                )}
+              </div>
+            </div>
+          ))}
+
+          {latestAssistant && !streaming && (
+            <div className={cn("space-y-2 border-t pt-3", expanded ? "max-w-[min(980px,94%)]" : "max-w-[96%]")}>
+              <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
+                <span className="mr-1">这次结果</span>
+                <Button
+                  type="button"
+                  variant={feedbackChoice === "helpful" ? "secondary" : "ghost"}
+                  size="icon"
+                  className="size-7"
+                  onClick={() => {
+                    setFeedbackChoice("helpful")
+                    setFeedbackSent(false)
+                  }}
+                  aria-label="有帮助"
+                  title="有帮助"
+                >
+                  <ThumbsUp />
+                </Button>
+                <Button
+                  type="button"
+                  variant={feedbackChoice === "unhelpful" ? "secondary" : "ghost"}
+                  size="icon"
+                  className="size-7"
+                  onClick={() => {
+                    setFeedbackChoice("unhelpful")
+                    setFeedbackSent(false)
+                  }}
+                  aria-label="需要改进"
+                  title="需要改进"
+                >
+                  <ThumbsDown />
+                </Button>
+                {feedbackSent && <span className="ml-1">已记录</span>}
+              </div>
+              {feedbackChoice && !feedbackSent && (
+                <div className="flex gap-2">
+                  <Input
+                    value={feedbackComment}
+                    onChange={(event) => setFeedbackComment(event.target.value)}
+                    placeholder="补充意见（可选）"
+                    className="h-8 text-xs"
+                  />
+                  <Button
+                    type="button"
+                    size="sm"
+                    className="h-8"
+                    onClick={handleFeedback}
+                    disabled={feedbackSaving}
+                  >
+                    {feedbackSaving ? <LoaderCircle className="animate-spin" /> : "提交"}
+                  </Button>
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+
+        <form onSubmit={handleSend} className={cn("border-t bg-card", expanded ? "p-4 sm:p-5" : "p-3 sm:p-4")}>
+          <div className="flex items-end gap-2">
+            <Textarea
+              value={input}
+              onChange={(event) => setInput(event.target.value)}
+              placeholder={selectedTask.placeholder}
+              rows={expanded ? 4 : 3}
+              className={cn("flex-1 resize-none bg-background", expanded ? "min-h-28" : "min-h-[84px]")}
+              onKeyDown={(event) => {
+                if (event.key === "Enter" && !event.shiftKey) {
+                  event.preventDefault()
+                  event.currentTarget.form?.requestSubmit()
+                }
+              }}
+            />
+            <Button
+              type="submit"
+              size="icon"
+              className="size-10 shrink-0"
+              disabled={!chatReady || !input.trim() || streaming}
+              aria-label="发送创作要求"
+              title="发送"
+            >
+              {streaming ? <LoaderCircle className="animate-spin" /> : <Send />}
+            </Button>
+          </div>
+          <p className="mt-2 text-xs text-muted-foreground">
+            {selectedBrand && selectedCarModel ? `${selectedBrand} · ${selectedCarModel} · ` : ""}
+            {selectedMaterialIds.length} 条参考素材
+          </p>
+        </form>
+      </div>
+    </div>
+  )
 
   return (
     <div className="min-h-screen">
@@ -437,17 +716,27 @@ export default function AiStudioPage() {
             variant="outline"
             size="icon"
             onClick={() => {
+              setTask("concept")
               setMessages([])
               setSelectedMaterials([])
+              setScopeFilter("all")
+              setMaterialSearch("")
+              setSelectedBrand("")
+              setSelectedCarModel("")
+              setMaterialsLoading(true)
               setGeneratedImages([])
+              setImageMessages([])
               selectReferenceImage(null)
               setImagePrompt("")
               setNoteTitle("")
-              setSavedMaterial(null)
+              setSavedCreation(null)
               setFeedbackChoice(null)
               setFeedbackComment("")
               setFeedbackSent(false)
+              setResumedCreationId(null)
+              setResumedTitle("")
               setChatError("")
+              window.history.replaceState({}, "", "/ai")
             }}
             aria-label="清空本轮创作"
             title="清空本轮创作"
@@ -463,6 +752,13 @@ export default function AiStudioPage() {
           </div>
         )}
 
+        {resumedCreationId && (
+          <div className="mb-5 flex items-start gap-2 border-y border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-900">
+            <History className="mt-0.5 size-4 shrink-0" />
+            <span>正在继续“{resumedTitle}”，已恢复 {messages.length} 条文案对话和 {imageMessages.length} 条图片记录</span>
+          </div>
+        )}
+
         {chatError && (
           <div className="mb-5 flex items-start gap-2 border-y border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
             <AlertCircle className="mt-0.5 size-4 shrink-0" />
@@ -470,7 +766,7 @@ export default function AiStudioPage() {
           </div>
         )}
 
-        <div className="grid items-start gap-5 lg:grid-cols-[260px_minmax(0,1fr)] xl:grid-cols-[280px_minmax(0,1fr)_300px]">
+        <div className="grid items-start gap-5 lg:grid-cols-[230px_minmax(0,1fr)] xl:grid-cols-[230px_minmax(520px,1.25fr)_minmax(360px,0.75fr)]">
           <aside className="overflow-hidden rounded-lg border bg-card" aria-label="创作参考">
             <div className="border-b px-4 py-3">
               <h2 className="flex items-center gap-2 text-sm font-semibold">
@@ -615,270 +911,61 @@ export default function AiStudioPage() {
             </div>
           </aside>
 
-          <section className="overflow-hidden rounded-lg border bg-card" aria-label="AI 对话">
-            <div className="border-b p-3">
-              <div className="grid grid-cols-2 gap-1 sm:grid-cols-3 lg:flex" role="tablist" aria-label="创作任务">
-                {TASKS.map(({ value, label, icon: Icon }) => (
-                  <button
-                    key={value}
-                    type="button"
-                    role="tab"
-                    aria-selected={task === value}
-                    onClick={() => setTask(value)}
-                    className={cn(
-                      "flex h-9 items-center justify-center gap-1.5 rounded-md px-3 text-xs font-medium text-muted-foreground transition-colors last:col-span-2 sm:last:col-span-1",
-                      task === value && "bg-accent text-accent-foreground"
-                    )}
-                  >
-                    <Icon className="size-3.5" />
-                    {label}
-                  </button>
-                ))}
-              </div>
-            </div>
-
-            <div className="flex h-[min(62vh,650px)] min-h-[480px] flex-col">
-              <div className="flex-1 space-y-4 overflow-y-auto p-4 sm:p-5">
-                {messages.length === 0 ? (
-                  <div className="flex min-h-full flex-col items-center justify-center px-6 text-center">
-                    <span className="mb-4 grid size-11 place-items-center rounded-full bg-accent text-primary">
-                      <Sparkles className="size-5" />
-                    </span>
-                    <h2 className="text-sm font-semibold">{selectedTask.label}</h2>
-                    <p className="mt-1 max-w-sm text-xs leading-5 text-muted-foreground">描述你想写的内容、场景或表达方向</p>
-                  </div>
-                ) : messages.map((message, index) => (
-                  <div
-                    key={`${message.role}-${index}`}
-                    className={cn("flex", message.role === "user" ? "justify-end" : "justify-start")}
-                  >
-                    <div className={cn(
-                      "max-w-[88%] whitespace-pre-wrap break-words rounded-lg px-4 py-3 text-sm leading-7",
-                      message.role === "user"
-                        ? "bg-primary text-primary-foreground"
-                        : "border bg-background text-foreground"
-                    )}>
-                      {message.content || (
-                        <span className="flex items-center gap-2 text-muted-foreground">
-                          <LoaderCircle className="size-4 animate-spin" />
-                          正在生成
-                        </span>
-                      )}
-                    </div>
-                  </div>
-                ))}
-
-                {latestAssistant && !streaming && (
-                  <div className="max-w-[88%] space-y-2 border-t pt-3">
-                    <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
-                      <span className="mr-1">这次结果</span>
-                      <Button
-                        type="button"
-                        variant={feedbackChoice === "helpful" ? "secondary" : "ghost"}
-                        size="icon"
-                        className="size-7"
-                        onClick={() => {
-                          setFeedbackChoice("helpful")
-                          setFeedbackSent(false)
-                        }}
-                        aria-label="有帮助"
-                        title="有帮助"
-                      >
-                        <ThumbsUp />
-                      </Button>
-                      <Button
-                        type="button"
-                        variant={feedbackChoice === "unhelpful" ? "secondary" : "ghost"}
-                        size="icon"
-                        className="size-7"
-                        onClick={() => {
-                          setFeedbackChoice("unhelpful")
-                          setFeedbackSent(false)
-                        }}
-                        aria-label="需要改进"
-                        title="需要改进"
-                      >
-                        <ThumbsDown />
-                      </Button>
-                      {feedbackSent && <span className="ml-1">已记录</span>}
-                    </div>
-                    {feedbackChoice && !feedbackSent && (
-                      <div className="flex gap-2">
-                        <Input
-                          value={feedbackComment}
-                          onChange={(event) => setFeedbackComment(event.target.value)}
-                          placeholder="补充意见（可选）"
-                          className="h-8 text-xs"
-                        />
-                        <Button
-                          type="button"
-                          size="sm"
-                          className="h-8"
-                          onClick={handleFeedback}
-                          disabled={feedbackSaving}
-                        >
-                          {feedbackSaving ? <LoaderCircle className="animate-spin" /> : "提交"}
-                        </Button>
-                      </div>
-                    )}
-                  </div>
-                )}
-              </div>
-
-              <form onSubmit={handleSend} className="border-t bg-card p-3 sm:p-4">
-                <div className="flex items-end gap-2">
-                  <Textarea
-                    value={input}
-                    onChange={(event) => setInput(event.target.value)}
-                    placeholder={selectedTask.placeholder}
-                    rows={3}
-                    className="min-h-[84px] flex-1 resize-none bg-background"
-                    onKeyDown={(event) => {
-                      if (event.key === "Enter" && !event.shiftKey) {
-                        event.preventDefault()
-                        event.currentTarget.form?.requestSubmit()
-                      }
-                    }}
-                  />
-                  <Button
-                    type="submit"
-                    size="icon"
-                    className="size-10 shrink-0"
-                    disabled={!chatReady || !input.trim() || streaming}
-                    aria-label="发送创作要求"
-                    title="发送"
-                  >
-                    {streaming ? <LoaderCircle className="animate-spin" /> : <Send />}
-                  </Button>
-                </div>
-                <p className="mt-2 text-xs text-muted-foreground">
-                  {selectedBrand && selectedCarModel ? `${selectedBrand} · ${selectedCarModel} · ` : ""}
-                  {selectedMaterialIds.length} 条参考素材
-                </p>
-              </form>
-            </div>
+          <section className="flex h-[min(75vh,780px)] min-h-[540px] overflow-hidden rounded-lg border bg-card" aria-label="AI 对话">
+            {renderConversation()}
           </section>
 
           <aside className="space-y-5 lg:col-span-2 xl:col-span-1" aria-label="生成与保存">
-            <section className="overflow-hidden rounded-lg border bg-card">
-              <div className="border-b px-4 py-3">
-                <h2 className="flex items-center gap-2 text-sm font-semibold">
-                  <ImagePlus className="size-4 text-primary" />
-                  参考图创作
-                </h2>
-              </div>
-              <div className="space-y-3 p-4">
-                {referencePreview ? (
-                  <div className="relative aspect-[4/3] overflow-hidden rounded-md border bg-muted">
-                    <Image src={referencePreview} alt="参考图预览" fill className="object-contain" unoptimized />
-                    <Button
-                      type="button"
-                      variant="secondary"
-                      size="icon"
-                      className="absolute right-2 top-2 size-7"
-                      onClick={() => selectReferenceImage(null)}
-                      aria-label="移除参考图"
-                      title="移除参考图"
-                    >
-                      <X />
-                    </Button>
-                  </div>
-                ) : (
-                  <label className="flex h-24 cursor-pointer flex-col items-center justify-center gap-2 rounded-md border border-dashed bg-muted/30 text-xs font-medium text-muted-foreground hover:bg-muted/60 hover:text-foreground">
-                    <Upload className="size-5" />
-                    选择参考图
-                    <input
-                      type="file"
-                      accept="image/png,image/jpeg,image/webp"
-                      className="sr-only"
-                      onChange={(event) => selectReferenceImage(event.target.files?.[0] ?? null)}
-                    />
-                  </label>
-                )}
-                <Textarea
-                  value={imagePrompt}
-                  onChange={(event) => setImagePrompt(event.target.value)}
-                  placeholder="描述要保留的内容和希望调整的方向"
-                  rows={4}
-                />
-                {latestAssistant && (
-                  <Button
-                    type="button"
-                    variant="ghost"
-                    size="sm"
-                    className="w-full justify-start text-muted-foreground"
-                    onClick={() => setImagePrompt(`参考这篇笔记调整图片：\n${latestAssistant.slice(0, 1200)}`)}
-                  >
-                    <Sparkles />
-                    使用当前笔记填写要求
-                  </Button>
-                )}
-                <Button
-                  type="button"
-                  className="w-full"
-                  onClick={handleGenerateImage}
-                  disabled={!imageReady || !referenceImage || !imagePrompt.trim() || generatingImage}
-                >
-                  {generatingImage ? <LoaderCircle className="animate-spin" /> : <ImagePlus />}
-                  {generatingImage ? "生成中" : "根据参考图生成"}
-                </Button>
-                {!imageReady && <p className="text-xs leading-5 text-muted-foreground">后台配置图片模型后可用</p>}
-
-                {generatedImages.length > 0 && (
-                  <div className="grid grid-cols-2 gap-2 border-t pt-3">
-                    {generatedImages.map((attachment) => (
-                      <div key={attachment.path} className="group relative aspect-square overflow-hidden rounded-md border bg-muted">
-                        <Image src={attachment.path} alt={attachment.name} fill className="object-cover" unoptimized />
-                        <Button
-                          type="button"
-                          variant="secondary"
-                          size="icon"
-                          className="absolute right-1.5 top-1.5 size-7"
-                          onClick={() => setGeneratedImages((current) => current.filter((item) => item.path !== attachment.path))}
-                          aria-label="移除生成图片"
-                          title="移除图片"
-                        >
-                          <X />
-                        </Button>
-                      </div>
-                    ))}
-                  </div>
-                )}
-              </div>
-            </section>
+            <AiImageWorkspace
+              selectedMaterialImages={selectedMaterialImages}
+              referenceAttachment={referenceAttachment}
+              referencePreview={referencePreview}
+              loadingReferencePath={loadingReferencePath}
+              imageMessages={imageMessages}
+              generatedImages={generatedImages}
+              generatingImage={generatingImage}
+              imagePrompt={imagePrompt}
+              imageReady={imageReady}
+              hasReferenceImage={Boolean(referenceImage)}
+              latestAssistant={latestAssistant}
+              onSelectReferenceAttachment={selectReferenceAttachment}
+              onSelectReferenceImage={selectReferenceImage}
+              onImagePromptChange={setImagePrompt}
+              onGenerateImage={handleGenerateImage}
+            />
 
             <section className="overflow-hidden rounded-lg border bg-card">
               <div className="border-b px-4 py-3">
                 <h2 className="flex items-center gap-2 text-sm font-semibold">
                   <Save className="size-4 text-primary" />
-                  保存笔记灵感
+                  保存到我的创作
                 </h2>
               </div>
               <div className="space-y-3 p-4">
                 <Input
                   value={noteTitle}
                   onChange={(event) => setNoteTitle(event.target.value)}
-                  placeholder="笔记灵感标题"
-                  disabled={!latestAssistant}
+                  placeholder="创作标题"
+                  disabled={!canSaveIdea}
                 />
                 <p className="text-xs leading-5 text-muted-foreground">
-                  将当前 AI 正文和 {generatedImages.length} 张配图保存到灵感中心
+                  将完整对话和 {generatedImages.length} 张配图保存到我的创作
                 </p>
                 <Button
                   type="button"
                   className="w-full"
                   onClick={handleSave}
-                  disabled={!latestAssistant || saving}
+                  disabled={!canSaveIdea || saving}
                 >
                   {saving ? <LoaderCircle className="animate-spin" /> : <Save />}
-                  {saving ? "保存中" : "保存为笔记灵感"}
+                  {saving ? "保存中" : resumedCreationId ? "更新我的创作" : "保存到我的创作"}
                 </Button>
-                {savedMaterial && (
+                {savedCreation && (
                   <div className="flex items-start gap-2 border-t pt-3 text-sm text-insight-foreground">
                     <CheckCircle2 className="mt-0.5 size-4 shrink-0" />
                     <span>
-                      已保存“{savedMaterial.title}”
-                      <Link href="/inspiration" className="ml-1 font-medium text-primary hover:underline">查看</Link>
+                      已保存“{savedCreation.title}”
+                      <Link href="/creations" className="ml-1 font-medium text-primary hover:underline">查看</Link>
                     </span>
                   </div>
                 )}
@@ -886,6 +973,14 @@ export default function AiStudioPage() {
             </section>
           </aside>
         </div>
+
+        <Dialog open={textWorkspaceOpen} onOpenChange={setTextWorkspaceOpen}>
+          <DialogContent className="flex h-[94dvh] w-[calc(100vw-1rem)] max-w-[1280px] flex-col gap-0 overflow-hidden p-0 sm:h-[90dvh] sm:max-w-[1280px]">
+            <DialogTitle className="sr-only">专注 AI 对话</DialogTitle>
+            <DialogDescription className="sr-only">查看完整对话并继续创作</DialogDescription>
+            {renderConversation(true)}
+          </DialogContent>
+        </Dialog>
       </main>
     </div>
   )

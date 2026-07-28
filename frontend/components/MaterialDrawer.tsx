@@ -9,12 +9,16 @@ import {
   ExternalLink,
   FileText,
   Heart,
+  MessageCircle,
+  Maximize2,
   Trash2,
+  ThumbsUp,
   Video,
   X,
 } from "lucide-react"
 import type { Material } from "@/lib/api"
 import { isImageAttachment, isVideoAttachment, MATERIAL_SCOPE_LABELS, SOURCE_TYPE_LABELS } from "@/lib/materials"
+import { ImageLightbox, type PreviewImage } from "@/components/ImageLightbox"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Separator } from "@/components/ui/separator"
@@ -69,6 +73,7 @@ export function MaterialDrawer({
 }: MaterialDrawerProps) {
   const [isDeleting, setIsDeleting] = useState(false)
   const [copiedSection, setCopiedSection] = useState<string | null>(null)
+  const [previewImage, setPreviewImage] = useState<PreviewImage | null>(null)
 
   if (!material) return null
 
@@ -97,6 +102,12 @@ export function MaterialDrawer({
   const otherAttachments = material.attachments.filter(
     (attachment) => !isImageAttachment(attachment) && !isVideoAttachment(attachment)
   )
+  const sourceMetadata = material.source_metadata?.platform === "xiaohongshu"
+    ? material.source_metadata
+    : null
+  const metrics = sourceMetadata?.metrics
+  const topComments = sourceMetadata?.top_comments ?? []
+  const formatMetric = (value?: number) => (value ?? 0).toLocaleString("zh-CN")
 
   return (
     <>
@@ -155,6 +166,50 @@ export function MaterialDrawer({
             )}
           </section>
 
+          {sourceMetadata && (
+            <section className="border-t py-5">
+              <div className="mb-3 flex items-center justify-between gap-3">
+                <h3 className="text-sm font-semibold">小红书互动数据</h3>
+                <span className="text-xs text-muted-foreground">已自动导入</span>
+              </div>
+              <div className="grid grid-cols-4 gap-2">
+                {[
+                  ["获赞", formatMetric(metrics?.likes)],
+                  ["收藏", formatMetric(metrics?.collections)],
+                  ["评论", formatMetric(metrics?.comments)],
+                  ["分享", formatMetric(metrics?.shares)],
+                ].map(([label, value]) => (
+                  <div key={label} className="rounded-md border bg-muted/25 px-2 py-2 text-center">
+                    <p className="text-sm font-semibold">{value}</p>
+                    <p className="mt-0.5 text-[11px] text-muted-foreground">{label}</p>
+                  </div>
+                ))}
+              </div>
+              {topComments.length > 0 && (
+                <div className="mt-4">
+                  <div className="mb-2 flex items-center gap-2 text-sm font-semibold">
+                    <MessageCircle className="size-4 text-primary" />
+                    热门评论 Top {topComments.length}
+                  </div>
+                  <div className="space-y-2">
+                    {topComments.map((comment, index) => (
+                      <div key={comment.id} className="flex gap-2 rounded-md border bg-background px-3 py-2 text-xs leading-5">
+                        <span className="w-4 shrink-0 text-muted-foreground">{index + 1}</span>
+                        <div className="min-w-0 flex-1">
+                          <p><span className="font-medium">{comment.author}</span><span className="ml-2 text-muted-foreground">{comment.content}</span></p>
+                          <p className="mt-1 flex items-center gap-1 text-[11px] text-muted-foreground">
+                            <ThumbsUp className="size-3" /> {formatMetric(comment.likes)} 赞
+                            {comment.reply_count > 0 && <span className="ml-2">{comment.reply_count} 条回复</span>}
+                          </p>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </section>
+          )}
+
           {imageAttachments.length > 0 && (
             <section className="border-t py-5">
               <div className="mb-3 flex items-center justify-between gap-3">
@@ -163,15 +218,25 @@ export function MaterialDrawer({
               </div>
               <div className="grid grid-cols-2 gap-2">
                 {imageAttachments.map((attachment, index) => (
-                  <a
+                  <button
+                    type="button"
                     key={`${attachment.path}-${index}`}
-                    href={attachment.path}
-                    target="_blank"
-                    rel="noopener noreferrer"
                     className={cn(
-                      "relative aspect-[4/3] overflow-hidden rounded-md border bg-muted",
+                      "group relative aspect-[4/3] overflow-hidden rounded-md border bg-muted outline-none focus-visible:ring-2 focus-visible:ring-ring",
                       imageAttachments.length === 1 && "col-span-2 aspect-video"
                     )}
+                    onClick={() => setPreviewImage({
+                      src: attachment.path,
+                      alt: attachment.name || `${material.title} 图片 ${index + 1}`,
+                      name: attachment.name,
+                    })}
+                    onDoubleClick={() => setPreviewImage({
+                      src: attachment.path,
+                      alt: attachment.name || `${material.title} 图片 ${index + 1}`,
+                      name: attachment.name,
+                    })}
+                    aria-label={`放大${attachment.name || `图片 ${index + 1}`}`}
+                    title="查看大图"
                   >
                     <Image
                       src={attachment.path}
@@ -181,7 +246,10 @@ export function MaterialDrawer({
                       className="object-cover"
                       unoptimized
                     />
-                  </a>
+                    <span className="absolute bottom-2 right-2 grid size-8 place-items-center rounded bg-black/60 text-white opacity-0 transition-opacity group-hover:opacity-100">
+                      <Maximize2 className="size-4" />
+                    </span>
+                  </button>
                 ))}
               </div>
             </section>
@@ -330,7 +398,7 @@ export function MaterialDrawer({
           </p>
         </div>
 
-        <footer className="flex items-center gap-2 border-t bg-card px-4 py-3 sm:px-6">
+        <footer className="flex flex-wrap items-center gap-2 border-t bg-card px-4 py-3 sm:px-6">
           <Button
             variant={material.is_favorite ? "secondary" : "outline"}
             className={cn("flex-1", material.is_favorite && "text-primary")}
@@ -356,6 +424,7 @@ export function MaterialDrawer({
           </Button>
         </footer>
       </aside>
+      <ImageLightbox image={previewImage} onOpenChange={(open) => !open && setPreviewImage(null)} />
     </>
   )
 }

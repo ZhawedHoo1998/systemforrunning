@@ -2,7 +2,8 @@
 
 import Link from "next/link"
 import { usePathname } from "next/navigation"
-import { CarFront, Clock3, Heart, Lightbulb, Plus, Search, Sparkles } from "lucide-react"
+import { CarFront, Clock3, FileText, Heart, Lightbulb, Plus, Search, Sparkles, UserRound } from "lucide-react"
+import { useAuth } from "@/components/AuthProvider"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { cn } from "@/lib/utils"
@@ -18,6 +19,7 @@ const navigation = [
   { href: "/", label: "车型素材", icon: CarFront },
   { href: "/inspiration", label: "灵感中心", icon: Lightbulb },
   { href: "/ai", label: "AI 创作", icon: Sparkles },
+  { href: "/creations", label: "我的创作", icon: FileText },
   { href: "/favorites", label: "我的收藏", icon: Heart },
   { href: "/recent", label: "最近新增", icon: Clock3 },
 ]
@@ -29,6 +31,7 @@ export function Header({
   showActions = true,
 }: HeaderProps) {
   const pathname = usePathname()
+  const { user } = useAuth()
 
   return (
     <header className="sticky top-0 z-40 border-b bg-card/95 backdrop-blur">
@@ -93,6 +96,21 @@ export function Header({
         ) : (
           <div className="ml-auto" />
         )}
+
+        <Button
+          asChild
+          variant="ghost"
+          size="sm"
+          className={cn(
+            "h-10 shrink-0 px-2 text-muted-foreground sm:px-3",
+            pathname === "/account" && "bg-accent text-accent-foreground"
+          )}
+        >
+          <Link href="/account" aria-label="账号设置" title="账号设置">
+            <UserRound />
+            <span className="hidden max-w-24 truncate xl:inline">{user?.display_name}</span>
+          </Link>
+        </Button>
       </div>
 
       <nav className="app-container flex h-12 items-stretch gap-0.5 border-t lg:hidden" aria-label="移动端导航">

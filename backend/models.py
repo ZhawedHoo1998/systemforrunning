@@ -1,7 +1,30 @@
 import uuid
 from datetime import datetime
-from sqlalchemy import Column, String, Text, Boolean, DateTime, JSON
+from sqlalchemy import Column, String, Text, Boolean, DateTime, ForeignKey, JSON
 from backend.database import Base
+
+
+class User(Base):
+    __tablename__ = "users"
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    username = Column(String(100), nullable=False, unique=True, index=True)
+    display_name = Column(String(200), nullable=False)
+    password_hash = Column(String(500), nullable=False)
+    role = Column(String(20), nullable=False, default="writer", index=True)
+    is_active = Column(Boolean, nullable=False, default=True, index=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class UserSession(Base):
+    __tablename__ = "user_sessions"
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    user_id = Column(String(36), ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    token_hash = Column(String(64), nullable=False, unique=True, index=True)
+    expires_at = Column(DateTime, nullable=False, index=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
 
 
 class Material(Base):
@@ -24,9 +47,33 @@ class Material(Base):
     suggest_title = Column(Text, nullable=True)
     tags = Column(JSON, default=list)
     attachments = Column(JSON, default=list)
+    source_metadata = Column(JSON, nullable=True)
     ai_conversation = Column(JSON, nullable=True)
     is_favorite = Column(Boolean, default=False)
     created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class UserFavorite(Base):
+    __tablename__ = "user_favorites"
+
+    user_id = Column(String(36), ForeignKey("users.id", ondelete="CASCADE"), primary_key=True)
+    material_id = Column(String(36), ForeignKey("materials.id", ondelete="CASCADE"), primary_key=True)
+    created_at = Column(DateTime, default=datetime.utcnow, index=True)
+
+
+class Creation(Base):
+    __tablename__ = "creations"
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    user_id = Column(String(36), ForeignKey("users.id"), nullable=False, index=True)
+    title = Column(String(500), nullable=False)
+    summary = Column(Text, nullable=True)
+    original_content = Column(Text, nullable=True)
+    tags = Column(JSON, default=list)
+    attachments = Column(JSON, default=list)
+    ai_conversation = Column(JSON, nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow, index=True)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
 
@@ -34,6 +81,7 @@ class AiFeedback(Base):
     __tablename__ = "ai_feedback"
 
     id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    user_id = Column(String(36), ForeignKey("users.id"), nullable=True, index=True)
     task = Column(String(30), nullable=False)
     rating = Column(String(20), nullable=False)
     comment = Column(Text, nullable=True)

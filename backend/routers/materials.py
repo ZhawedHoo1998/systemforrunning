@@ -10,8 +10,14 @@ from pydantic import BaseModel
 
 from backend.database import get_db
 from backend import crud
+from backend.auth import get_current_user
+from backend.models import User
 
-router = APIRouter(prefix="/api/materials", tags=["materials"])
+router = APIRouter(
+    prefix="/api/materials",
+    tags=["materials"],
+    dependencies=[Depends(get_current_user)],
+)
 
 UPLOAD_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "uploads")
 os.makedirs(UPLOAD_DIR, exist_ok=True)
@@ -39,6 +45,7 @@ class MaterialCreate(BaseModel):
     learning_points: Optional[str] = None
     suggest_title: Optional[str] = None
     tags: List[str] = []
+    source_metadata: Optional[dict] = None
 
 
 class MaterialUpdate(BaseModel):
@@ -57,9 +64,10 @@ class MaterialUpdate(BaseModel):
     learning_points: Optional[str] = None
     suggest_title: Optional[str] = None
     tags: Optional[List[str]] = None
+    source_metadata: Optional[dict] = None
 
 
-def material_to_dict(material):
+def material_to_dict(material, is_favorite: bool = False):
     return {
         "id": str(material.id),
         "title": material.title,
@@ -78,8 +86,8 @@ def material_to_dict(material):
         "suggest_title": material.suggest_title,
         "tags": material.tags or [],
         "attachments": material.attachments or [],
-        "ai_conversation": material.ai_conversation,
-        "is_favorite": material.is_favorite,
+        "source_metadata": material.source_metadata,
+        "is_favorite": is_favorite,
         "created_at": material.created_at.isoformat() if material.created_at else None,
         "updated_at": material.updated_at.isoformat() if material.updated_at else None,
     }
@@ -194,6 +202,7 @@ async def list_materials(
     order: str = "desc",
     page: int = 1,
     page_size: int = 20,
+    current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
     if material_scope and material_scope not in MATERIAL_SCOPES:
@@ -201,6 +210,7 @@ async def list_materials(
     content_types_list = content_types.split(",") if content_types else None
     result = crud.get_materials(
         db,
+        user_id=current_user.id,
         q=q,
         material_scope=material_scope,
         brand=brand,
@@ -213,7 +223,15 @@ async def list_materials(
         page=page,
         page_size=page_size,
     )
-    result["items"] = [material_to_dict(m) for m in result["items"]]
+    favorite_ids = crud.get_favorite_material_ids(
+        db,
+        current_user.id,
+        [material.id for material in result["items"]],
+    )
+    result["items"] = [
+        material_to_dict(material, material.id in favorite_ids)
+        for material in result["items"]
+    ]
     return result
 
 
@@ -221,20 +239,30 @@ async def list_materials(
 async def list_favorites(
     page: int = 1,
     page_size: int = 20,
+    current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    result = crud.get_favorites(db, page, page_size)
-    result["items"] = [material_to_dict(m) for m in result["items"]]
+    result = crud.get_favorites(db, current_user.id, page, page_size)
+    result["items"] = [material_to_dict(m, True) for m in result["items"]]
     return result
 
 
 @router.get("/recent")
 async def list_recent(
     limit: int = 30,
+    current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
     materials = crud.get_recent(db, limit)
-    return [material_to_dict(m) for m in materials]
+    favorite_ids = crud.get_favorite_material_ids(
+        db,
+        current_user.id,
+        [material.id for material in materials],
+    )
+    return [
+        material_to_dict(material, material.id in favorite_ids)
+        for material in materials
+    ]
 
 
 @router.get("/options")
@@ -255,11 +283,16 @@ async def get_facets(
 
 
 @router.get("/{material_id}")
-async def get_material(material_id: str, db: Session = Depends(get_db)):
+async def get_material(
+    material_id: str,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
     material = crud.get_material(db, material_id)
     if not material:
         raise HTTPException(status_code=404, detail="Material not found")
-    return material_to_dict(material)
+    favorite_ids = crud.get_favorite_material_ids(db, current_user.id, [material.id])
+    return material_to_dict(material, material.id in favorite_ids)
 
 
 @router.post("")
@@ -279,26 +312,20 @@ async def create_material(
     learning_points: Optional[str] = Form(None),
     suggest_title: Optional[str] = Form(None),
     tags: str = Form("[]"),
+    source_metadata: str = Form("{}"),
     attachments: str = Form("[]"),
-    ai_conversation: Optional[str] = Form(None),
     is_favorite: bool = Form(False),
     files: List[UploadFile] = File(default=[]),
+    current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
     content_types_list = parse_json_list(content_types, "内容类型")
     tags_list = parse_json_list(tags, "标签")
+    source_metadata_object = parse_json_object(source_metadata, "来源信息")
     attachments_list = parse_json_list(attachments, "附件")
-    ai_conversation_data = (
-        parse_json_object(ai_conversation, "AI 会话")
-        if ai_conversation is not None
-        else None
-    )
     brand, car_model = normalize_scope_fields(material_scope, brand, car_model)
 
     uploaded_attachments = await save_uploads(files)
-
-    if ai_conversation_data is not None and uploaded_attachments:
-        ai_conversation_data["reference_image_attachment"] = uploaded_attachments[-1]
 
     all_attachments = attachments_list + uploaded_attachments
 
@@ -319,12 +346,13 @@ async def create_material(
         "suggest_title": suggest_title,
         "tags": tags_list,
         "attachments": all_attachments,
-        "ai_conversation": ai_conversation_data,
-        "is_favorite": is_favorite,
+        "source_metadata": source_metadata_object or None,
     }
 
     material = crud.create_material(db, material_data)
-    return material_to_dict(material)
+    if is_favorite:
+        crud.add_favorite(db, current_user.id, material.id)
+    return material_to_dict(material, is_favorite)
 
 
 @router.put("/{material_id}")
@@ -345,9 +373,10 @@ async def update_material(
     learning_points: Optional[str] = Form(None),
     suggest_title: Optional[str] = Form(None),
     tags: Optional[str] = Form(None),
+    source_metadata: Optional[str] = Form(None),
     attachments: Optional[str] = Form(None),
-    ai_conversation: Optional[str] = Form(None),
     files: List[UploadFile] = File(default=[]),
+    current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
     existing_material = crud.get_material(db, material_id)
@@ -390,12 +419,10 @@ async def update_material(
         material_data["suggest_title"] = suggest_title
     if tags is not None:
         material_data["tags"] = parse_json_list(tags, "标签")
+    if source_metadata is not None:
+        source_metadata_object = parse_json_object(source_metadata, "来源信息")
+        material_data["source_metadata"] = source_metadata_object or None
     uploaded_attachments = await save_uploads(files)
-    if ai_conversation is not None:
-        ai_conversation_data = parse_json_object(ai_conversation, "AI 会话")
-        if uploaded_attachments:
-            ai_conversation_data["reference_image_attachment"] = uploaded_attachments[-1]
-        material_data["ai_conversation"] = ai_conversation_data
     if attachments is not None or uploaded_attachments:
         retained_attachments = (
             parse_json_list(attachments, "附件")
@@ -405,7 +432,8 @@ async def update_material(
         material_data["attachments"] = retained_attachments + uploaded_attachments
 
     material = crud.update_material(db, material_id, material_data)
-    return material_to_dict(material)
+    favorite_ids = crud.get_favorite_material_ids(db, current_user.id, [material.id])
+    return material_to_dict(material, material.id in favorite_ids)
 
 
 @router.delete("/{material_id}")
@@ -417,8 +445,13 @@ async def delete_material(material_id: str, db: Session = Depends(get_db)):
 
 
 @router.post("/{material_id}/favorite")
-async def toggle_favorite(material_id: str, db: Session = Depends(get_db)):
-    material = crud.toggle_favorite(db, material_id)
-    if not material:
+async def toggle_favorite(
+    material_id: str,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    result = crud.toggle_favorite(db, current_user.id, material_id)
+    if not result:
         raise HTTPException(status_code=404, detail="Material not found")
-    return material_to_dict(material)
+    material, is_favorite = result
+    return material_to_dict(material, is_favorite)

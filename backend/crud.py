@@ -1,8 +1,8 @@
 from datetime import datetime
 from typing import Optional, List
-from sqlalchemy import or_
+from sqlalchemy import and_, or_
 from sqlalchemy.orm import Session
-from backend.models import Material
+from backend.models import Creation, Material, UserFavorite
 
 
 CONTENT_TYPES = [
@@ -39,7 +39,6 @@ GENERAL_CONTENT_TYPES = [
 ]
 
 SOURCE_TYPES = [
-    ("ai_generated", "AI 生成"),
     ("self_experience", "自家经验"),
     ("product资料", "产品资料"),
     ("customer_feedback", "客户反馈"),
@@ -58,6 +57,7 @@ SOURCE_TYPE_LABELS = {k: v for k, v in SOURCE_TYPES}
 
 def get_materials(
     db: Session,
+    user_id: str,
     q: Optional[str] = None,
     material_scope: Optional[str] = None,
     brand: Optional[str] = None,
@@ -99,8 +99,19 @@ def get_materials(
     if content_types:
         query = query.filter(Material.content_types.contains(content_types))
 
-    if is_favorite is not None:
-        query = query.filter(Material.is_favorite == is_favorite)
+    if is_favorite is True:
+        query = query.join(
+            UserFavorite,
+            UserFavorite.material_id == Material.id,
+        ).filter(UserFavorite.user_id == user_id)
+    elif is_favorite is False:
+        query = query.outerjoin(
+            UserFavorite,
+            and_(
+                UserFavorite.material_id == Material.id,
+                UserFavorite.user_id == user_id,
+            ),
+        ).filter(UserFavorite.user_id.is_(None))
 
     sort_column = getattr(Material, sort, Material.created_at)
     if order == "asc":
@@ -142,25 +153,68 @@ def delete_material(db: Session, material_id: str) -> bool:
     material = get_material(db, material_id)
     if not material:
         return False
+    db.query(UserFavorite).filter(UserFavorite.material_id == material_id).delete(
+        synchronize_session=False
+    )
     db.delete(material)
     db.commit()
     return True
 
 
-def toggle_favorite(db: Session, material_id: str) -> Optional[Material]:
+def get_favorite_material_ids(
+    db: Session,
+    user_id: str,
+    material_ids: Optional[List[str]] = None,
+) -> set[str]:
+    query = db.query(UserFavorite.material_id).filter(
+        UserFavorite.user_id == user_id
+    )
+    if material_ids is not None:
+        if not material_ids:
+            return set()
+        query = query.filter(UserFavorite.material_id.in_(material_ids))
+    return {material_id for (material_id,) in query.all()}
+
+
+def toggle_favorite(
+    db: Session,
+    user_id: str,
+    material_id: str,
+) -> Optional[tuple[Material, bool]]:
     material = get_material(db, material_id)
     if not material:
         return None
-    material.is_favorite = not material.is_favorite
+    favorite = db.query(UserFavorite).filter(
+        UserFavorite.user_id == user_id,
+        UserFavorite.material_id == material_id,
+    ).first()
+    if favorite:
+        db.delete(favorite)
+        is_favorite = False
+    else:
+        db.add(UserFavorite(user_id=user_id, material_id=material_id))
+        is_favorite = True
     db.commit()
-    db.refresh(material)
-    return material
+    return material, is_favorite
 
 
-def get_favorites(db: Session, page: int = 1, page_size: int = 20):
-    query = db.query(Material).filter(Material.is_favorite == True)
+def add_favorite(db: Session, user_id: str, material_id: str):
+    existing = db.query(UserFavorite).filter(
+        UserFavorite.user_id == user_id,
+        UserFavorite.material_id == material_id,
+    ).first()
+    if not existing:
+        db.add(UserFavorite(user_id=user_id, material_id=material_id))
+        db.commit()
+
+
+def get_favorites(db: Session, user_id: str, page: int = 1, page_size: int = 20):
+    query = db.query(Material).join(
+        UserFavorite,
+        UserFavorite.material_id == Material.id,
+    ).filter(UserFavorite.user_id == user_id)
     total = query.count()
-    items = query.order_by(Material.updated_at.desc()).offset((page - 1) * page_size).limit(page_size).all()
+    items = query.order_by(UserFavorite.created_at.desc()).offset((page - 1) * page_size).limit(page_size).all()
     return {"items": items, "total": total, "page": page, "page_size": page_size}
 
 
@@ -220,3 +274,67 @@ def get_content_type_counts(
         for content_type in content_types or []:
             counts[content_type] = counts.get(content_type, 0) + 1
     return {"total": total, "content_types": counts}
+
+
+def get_creations(
+    db: Session,
+    user_id: str,
+    q: Optional[str] = None,
+    page: int = 1,
+    page_size: int = 20,
+):
+    query = db.query(Creation).filter(Creation.user_id == user_id)
+    if q:
+        search = f"%{q}%"
+        query = query.filter(
+            or_(
+                Creation.title.ilike(search),
+                Creation.summary.ilike(search),
+                Creation.original_content.ilike(search),
+            )
+        )
+
+    total = query.count()
+    items = (
+        query.order_by(Creation.updated_at.desc())
+        .offset((page - 1) * page_size)
+        .limit(page_size)
+        .all()
+    )
+    return {"items": items, "total": total, "page": page, "page_size": page_size}
+
+
+def get_creation(db: Session, user_id: str, creation_id: str) -> Optional[Creation]:
+    return db.query(Creation).filter(
+        Creation.id == creation_id,
+        Creation.user_id == user_id,
+    ).first()
+
+
+def create_creation(db: Session, creation_data: dict) -> Creation:
+    creation = Creation(**creation_data)
+    db.add(creation)
+    db.commit()
+    db.refresh(creation)
+    return creation
+
+
+def update_creation(db: Session, user_id: str, creation_id: str, creation_data: dict) -> Optional[Creation]:
+    creation = get_creation(db, user_id, creation_id)
+    if not creation:
+        return None
+    for key, value in creation_data.items():
+        setattr(creation, key, value)
+    creation.updated_at = datetime.utcnow()
+    db.commit()
+    db.refresh(creation)
+    return creation
+
+
+def delete_creation(db: Session, user_id: str, creation_id: str) -> bool:
+    creation = get_creation(db, user_id, creation_id)
+    if not creation:
+        return False
+    db.delete(creation)
+    db.commit()
+    return True

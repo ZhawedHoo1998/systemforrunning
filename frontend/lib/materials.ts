@@ -24,7 +24,6 @@ export const GENERAL_CONTENT_TYPES = [
 ]
 
 export const SOURCE_TYPE_LABELS: Record<string, string> = {
-  ai_generated: "AI 生成",
   self_experience: "自家经验",
   product资料: "产品资料",
   customer_feedback: "客户反馈",

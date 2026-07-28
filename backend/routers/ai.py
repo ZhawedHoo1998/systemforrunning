@@ -12,8 +12,9 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
+from backend.auth import get_current_user, require_admin
 from backend.database import get_db
-from backend.models import AiFeedback, Material
+from backend.models import AiFeedback, Material, User
 
 try:
     from openai import AsyncOpenAI, OpenAIError
@@ -24,7 +25,11 @@ except ImportError:  # The rest of the app stays available before AI dependencie
         pass
 
 
-router = APIRouter(prefix="/api/ai", tags=["ai"])
+router = APIRouter(
+    prefix="/api/ai",
+    tags=["ai"],
+    dependencies=[Depends(get_current_user)],
+)
 logger = logging.getLogger(__name__)
 
 UPLOAD_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "uploads")
@@ -209,8 +214,13 @@ async def ai_status():
 
 
 @router.post("/feedback")
-async def create_feedback(request: FeedbackRequest, db: Session = Depends(get_db)):
+async def create_feedback(
+    request: FeedbackRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
     feedback = AiFeedback(
+        user_id=current_user.id,
         task=request.task,
         rating=request.rating,
         comment=request.comment.strip() if request.comment else None,
@@ -228,7 +238,11 @@ async def create_feedback(request: FeedbackRequest, db: Session = Depends(get_db
 
 
 @router.get("/feedback")
-async def list_feedback(limit: int = 50, db: Session = Depends(get_db)):
+async def list_feedback(
+    limit: int = 50,
+    _: User = Depends(require_admin),
+    db: Session = Depends(get_db),
+):
     rows = (
         db.query(AiFeedback)
         .order_by(AiFeedback.created_at.desc())
@@ -306,6 +320,8 @@ async def chat(request: ChatRequest, db: Session = Depends(get_db)):
 async def generate_image(
     prompt: str = Form(..., min_length=3, max_length=5000),
     reference_image: UploadFile = File(...),
+    reference_attachment: Optional[str] = Form(None),
+    image_history: str = Form("[]"),
     brand: Optional[str] = Form(None),
     car_model: Optional[str] = Form(None),
     material_ids: str = Form("[]"),
@@ -320,6 +336,29 @@ async def generate_image(
         raise HTTPException(status_code=422, detail="参考素材格式不正确") from error
     if not isinstance(parsed_material_ids, list) or len(parsed_material_ids) > 8:
         raise HTTPException(status_code=422, detail="参考素材最多选择 8 条")
+    try:
+        parsed_image_history = json.loads(image_history)
+    except json.JSONDecodeError as error:
+        raise HTTPException(status_code=422, detail="图片对话历史格式不正确") from error
+    if (
+        not isinstance(parsed_image_history, list)
+        or len(parsed_image_history) > 20
+        or any(not isinstance(item, str) or len(item) > 5000 for item in parsed_image_history)
+    ):
+        raise HTTPException(status_code=422, detail="图片对话历史无效")
+
+    reference_attachment_data = None
+    if reference_attachment:
+        try:
+            reference_attachment_data = json.loads(reference_attachment)
+        except json.JSONDecodeError as error:
+            raise HTTPException(status_code=422, detail="参考图附件格式不正确") from error
+        if (
+            not isinstance(reference_attachment_data, dict)
+            or not isinstance(reference_attachment_data.get("path"), str)
+            or not reference_attachment_data["path"].startswith("/uploads/")
+        ):
+            raise HTTPException(status_code=422, detail="参考图附件无效")
 
     content_type = (reference_image.content_type or "").lower()
     if content_type not in SUPPORTED_REFERENCE_IMAGE_TYPES:
@@ -339,6 +378,14 @@ async def generate_image(
         prompt,
         "以用户上传的参考图为主要视觉依据，保留用户要求的主体、构图或氛围，不要无依据地改变产品结构。",
     ]
+    if parsed_image_history:
+        prompt_parts.append(
+            "此前各轮修改要求（用于理解连续意图，当前要求优先）：\n"
+            + "\n".join(
+                f"{index}. {item}"
+                for index, item in enumerate(parsed_image_history, start=1)
+            )
+        )
     if vehicle:
         prompt_parts.append(f"品牌车型背景：{vehicle}")
     if context:
@@ -384,11 +431,29 @@ async def generate_image(
     async with aiofiles.open(filepath, "wb") as output:
         await output.write(image_bytes)
 
+    if reference_attachment_data is None:
+        reference_extension = {
+            "image/jpeg": ".jpg",
+            "image/png": ".png",
+            "image/webp": ".webp",
+        }[content_type]
+        reference_filename = f"ai-reference-{uuid.uuid4().hex}{reference_extension}"
+        reference_filepath = os.path.join(UPLOAD_DIR, reference_filename)
+        async with aiofiles.open(reference_filepath, "wb") as output:
+            await output.write(reference_bytes)
+        reference_attachment_data = {
+            "name": reference_image.filename or f"参考图{reference_extension}",
+            "path": f"/uploads/{reference_filename}",
+            "type": content_type,
+            "size": len(reference_bytes),
+        }
+
     return {
         "attachment": {
             "name": "AI 生成配图.png",
             "path": f"/uploads/{filename}",
             "type": "image/png",
             "size": len(image_bytes),
-        }
+        },
+        "reference_attachment": reference_attachment_data,
     }
