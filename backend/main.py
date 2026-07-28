@@ -18,7 +18,7 @@ from backend.database import (
     migrate_material_scope,
     migrate_multi_user_data,
 )
-from backend.routers import ai, creations, materials, users, xiaohongshu
+from backend.routers import ai, creations, materials, users, xiaohongshu, xiaohongshu_shop
 
 Base.metadata.create_all(bind=engine)
 migrate_material_scope()
@@ -52,6 +52,7 @@ app.mount("/uploads", StaticFiles(directory=UPLOAD_DIR), name="uploads")
 
 app.include_router(materials.router)
 app.include_router(xiaohongshu.router)
+app.include_router(xiaohongshu_shop.router)
 app.include_router(creations.router)
 app.include_router(ai.router)
 app.include_router(users.auth_router)
