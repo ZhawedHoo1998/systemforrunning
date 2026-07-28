@@ -11,7 +11,18 @@ from backend.security import create_session_token, hash_session_token
 
 SESSION_COOKIE_NAME = "ruby_rain_session"
 SESSION_DAYS = max(1, min(int(os.getenv("SESSION_DAYS", "14")), 90))
-SESSION_COOKIE_SECURE = os.getenv("SESSION_COOKIE_SECURE", "false").lower() == "true"
+SESSION_COOKIE_SECURE_MODE = os.getenv("SESSION_COOKIE_SECURE", "auto").strip().lower()
+
+
+def use_secure_session_cookie(request: Request) -> bool:
+    if SESSION_COOKIE_SECURE_MODE in {"true", "1", "yes"}:
+        return True
+    if SESSION_COOKIE_SECURE_MODE in {"false", "0", "no"}:
+        return False
+
+    forwarded_proto = request.headers.get("x-forwarded-proto", "")
+    forwarded_proto = forwarded_proto.split(",", 1)[0].strip().lower()
+    return request.url.scheme == "https" or forwarded_proto == "https"
 
 
 def create_user_session(db: Session, user: User) -> tuple[str, datetime]:

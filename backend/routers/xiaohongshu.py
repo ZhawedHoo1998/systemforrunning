@@ -416,12 +416,31 @@ async def import_xiaohongshu_material(request: XiaohongshuImportRequest):
     normalized_note = normalize_note(note_data)
 
     warnings = []
-    try:
-        comments_data = await run_xhs_command("comments", resolved_url, timeout_seconds=120)
-        top_comments = normalize_comments(comments_data)
-    except HTTPException as error:
-        top_comments = []
-        warnings.append(str(error.detail))
+    comment_targets = []
+    original_host = urlparse(share_url).hostname
+    if _host_allowed(original_host, ("xiaohongshu.com",)):
+        comment_targets.append(share_url)
+    comment_targets.append(resolved_url)
+    if normalized_note["note_id"]:
+        comment_targets.append(normalized_note["note_id"])
+
+    top_comments = []
+    comment_error = ""
+    tried_targets = set()
+    for comment_target in comment_targets:
+        if comment_target in tried_targets:
+            continue
+        tried_targets.add(comment_target)
+        try:
+            comments_data = await run_xhs_command("comments", comment_target, timeout_seconds=120)
+            top_comments = normalize_comments(comments_data)
+            if top_comments:
+                break
+        except HTTPException as error:
+            comment_error = str(error.detail)
+
+    if not top_comments:
+        warnings.append(comment_error or "这篇笔记暂未获取到公开评论，或小红书暂时限制了评论接口")
 
     attachments, image_warnings = await download_images(normalized_note["image_urls"])
     warnings.extend(image_warnings)

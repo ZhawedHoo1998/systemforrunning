@@ -3,7 +3,6 @@ import os
 from dotenv import load_dotenv
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.staticfiles import StaticFiles
 
 PROJECT_DIR = os.path.dirname(os.path.dirname(__file__))
 load_dotenv(os.path.join(PROJECT_DIR, ".env"))
@@ -18,7 +17,7 @@ from backend.database import (
     migrate_material_scope,
     migrate_multi_user_data,
 )
-from backend.routers import ai, creations, materials, users, xiaohongshu, xiaohongshu_shop
+from backend.routers import ai, creations, materials, uploads, users, xiaohongshu, xiaohongshu_shop
 
 Base.metadata.create_all(bind=engine)
 migrate_material_scope()
@@ -27,7 +26,14 @@ migrate_material_source_metadata()
 migrate_multi_user_data()
 migrate_ai_materials_to_creations()
 
-app = FastAPI(title="Ruby Rain 香氛素材库 API", version="1.0.0")
+api_docs_enabled = os.getenv("API_DOCS_ENABLED", "true").lower() == "true"
+app = FastAPI(
+    title="Ruby Rain 香氛素材库 API",
+    version="1.0.0",
+    docs_url="/docs" if api_docs_enabled else None,
+    redoc_url="/redoc" if api_docs_enabled else None,
+    openapi_url="/openapi.json" if api_docs_enabled else None,
+)
 
 frontend_origins = [
     origin.strip()
@@ -46,11 +52,8 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-UPLOAD_DIR = os.path.join(os.path.dirname(__file__), "uploads")
-os.makedirs(UPLOAD_DIR, exist_ok=True)
-app.mount("/uploads", StaticFiles(directory=UPLOAD_DIR), name="uploads")
-
 app.include_router(materials.router)
+app.include_router(uploads.router)
 app.include_router(xiaohongshu.router)
 app.include_router(xiaohongshu_shop.router)
 app.include_router(creations.router)

@@ -1,4 +1,4 @@
-const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"
+const API_BASE = (process.env.NEXT_PUBLIC_API_URL || "").replace(/\/$/, "")
 
 export type MaterialScope = "vehicle" | "general"
 
@@ -242,11 +242,23 @@ export interface AiImageMessage {
   role: "user" | "assistant"
   content: string
   reference?: Attachment
+  references?: Attachment[]
   image?: Attachment
 }
 
+export interface AiImageThread {
+  id: string
+  title: string
+  image_prompt: string
+  selected_references: Attachment[]
+  generated_images: Attachment[]
+  messages: AiImageMessage[]
+  created_at: string
+  updated_at: string
+}
+
 export interface AiConversation {
-  version: 1
+  version: 1 | 2
   task: AiTask
   messages: AiMessage[]
   selected_material_ids: string[]
@@ -259,6 +271,9 @@ export interface AiConversation {
   image_messages?: AiImageMessage[]
   reference_image_attachment?: Attachment | null
   active_reference_attachment?: Attachment | null
+  image_threads?: AiImageThread[]
+  active_image_thread_id?: string | null
+  uploaded_reference_images?: Attachment[]
   prompt_version: string | null
   saved_at: string
 }
@@ -282,8 +297,8 @@ export interface AiChatRequest {
 
 export interface AiImageRequest {
   prompt: string
-  reference_image: File
-  reference_attachment?: Attachment | null
+  reference_images: File[]
+  reference_attachments: Attachment[]
   history?: string[]
   brand?: string
   car_model?: string
@@ -293,6 +308,11 @@ export interface AiImageRequest {
 export interface AiImageResult {
   attachment: Attachment
   reference_attachment: Attachment
+  reference_attachments: Attachment[]
+}
+
+export interface AiReferenceUploadResult {
+  attachments: Attachment[]
 }
 
 export interface AiFeedbackRequest {
@@ -510,12 +530,10 @@ export async function streamAiChat(
 export async function generateAiImage(payload: AiImageRequest): Promise<AiImageResult> {
   const formData = new FormData()
   formData.append("prompt", payload.prompt)
-  formData.append("reference_image", payload.reference_image)
+  payload.reference_images.forEach((image) => formData.append("reference_images", image, image.name))
   formData.append("material_ids", JSON.stringify(payload.material_ids))
   formData.append("image_history", JSON.stringify(payload.history || []))
-  if (payload.reference_attachment) {
-    formData.append("reference_attachment", JSON.stringify(payload.reference_attachment))
-  }
+  formData.append("reference_attachments", JSON.stringify(payload.reference_attachments))
   if (payload.brand) formData.append("brand", payload.brand)
   if (payload.car_model) formData.append("car_model", payload.car_model)
 
@@ -524,6 +542,17 @@ export async function generateAiImage(payload: AiImageRequest): Promise<AiImageR
     body: formData,
   })
   if (!res.ok) await throwApiError(res, "AI 图片生成失败")
+  return res.json()
+}
+
+export async function uploadAiReferenceImages(files: File[]): Promise<AiReferenceUploadResult> {
+  const formData = new FormData()
+  files.forEach((file) => formData.append("reference_images", file, file.name))
+  const res = await apiFetch(`${API_BASE}/api/ai/image-references`, {
+    method: "POST",
+    body: formData,
+  })
+  if (!res.ok) await throwApiError(res, "参考图上传失败")
   return res.json()
 }
 

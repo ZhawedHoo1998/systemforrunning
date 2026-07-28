@@ -43,6 +43,7 @@ PROMPT_PATH = os.path.join(
 DEFAULT_OPENAI_BASE_URL = "https://api.aixhan.com/v1"
 DEFAULT_OPENAI_TEXT_MODEL = "gpt-5.6-sol"
 MAX_REFERENCE_IMAGE_SIZE = 20 * 1024 * 1024
+MAX_REFERENCE_IMAGES = 8
 SUPPORTED_REFERENCE_IMAGE_TYPES = {"image/jpeg", "image/png", "image/webp"}
 
 AiTask = Literal["concept", "title", "note", "video", "rewrite"]
@@ -316,10 +317,59 @@ async def chat(request: ChatRequest, db: Session = Depends(get_db)):
     )
 
 
+async def read_reference_upload(reference_image: UploadFile):
+    content_type = (reference_image.content_type or "").lower()
+    if content_type not in SUPPORTED_REFERENCE_IMAGE_TYPES:
+        await reference_image.close()
+        raise HTTPException(status_code=415, detail="参考图仅支持 JPG、PNG 或 WebP")
+    image_bytes = await reference_image.read(MAX_REFERENCE_IMAGE_SIZE + 1)
+    await reference_image.close()
+    if len(image_bytes) > MAX_REFERENCE_IMAGE_SIZE:
+        raise HTTPException(status_code=413, detail="单张参考图不能超过 20MB")
+    if not image_bytes:
+        raise HTTPException(status_code=422, detail="参考图内容为空")
+    return {
+        "filename": reference_image.filename or "reference.png",
+        "content_type": content_type,
+        "bytes": image_bytes,
+    }
+
+
+async def save_reference_upload(reference: dict):
+    extension = {
+        "image/jpeg": ".jpg",
+        "image/png": ".png",
+        "image/webp": ".webp",
+    }[reference["content_type"]]
+    filename = f"ai-reference-{uuid.uuid4().hex}{extension}"
+    filepath = os.path.join(UPLOAD_DIR, filename)
+    async with aiofiles.open(filepath, "wb") as output:
+        await output.write(reference["bytes"])
+    return {
+        "name": reference["filename"] or f"参考图{extension}",
+        "path": f"/uploads/{filename}",
+        "type": reference["content_type"],
+        "size": len(reference["bytes"]),
+    }
+
+
+@router.post("/image-references")
+async def upload_image_references(
+    reference_images: list[UploadFile] = File(...),
+):
+    if not reference_images or len(reference_images) > MAX_REFERENCE_IMAGES:
+        raise HTTPException(status_code=422, detail="每次可上传 1 至 8 张参考图")
+    references = [await read_reference_upload(image) for image in reference_images]
+    attachments = [await save_reference_upload(reference) for reference in references]
+    return {"attachments": attachments}
+
+
 @router.post("/images")
 async def generate_image(
     prompt: str = Form(..., min_length=3, max_length=5000),
-    reference_image: UploadFile = File(...),
+    reference_images: list[UploadFile] = File(default=[]),
+    reference_image: Optional[UploadFile] = File(None),
+    reference_attachments: str = Form("[]"),
     reference_attachment: Optional[str] = Form(None),
     image_history: str = Form("[]"),
     brand: Optional[str] = Form(None),
@@ -347,28 +397,41 @@ async def generate_image(
     ):
         raise HTTPException(status_code=422, detail="图片对话历史无效")
 
-    reference_attachment_data = None
+    uploads = list(reference_images)
+    if reference_image is not None:
+        uploads.append(reference_image)
+    if not uploads or len(uploads) > MAX_REFERENCE_IMAGES:
+        raise HTTPException(status_code=422, detail="每轮需选择 1 至 8 张参考图")
+
+    try:
+        reference_attachment_data = json.loads(reference_attachments)
+    except json.JSONDecodeError as error:
+        raise HTTPException(status_code=422, detail="参考图附件格式不正确") from error
+    if not isinstance(reference_attachment_data, list):
+        raise HTTPException(status_code=422, detail="参考图附件格式不正确")
     if reference_attachment:
         try:
-            reference_attachment_data = json.loads(reference_attachment)
+            legacy_attachment = json.loads(reference_attachment)
         except json.JSONDecodeError as error:
             raise HTTPException(status_code=422, detail="参考图附件格式不正确") from error
-        if (
-            not isinstance(reference_attachment_data, dict)
-            or not isinstance(reference_attachment_data.get("path"), str)
-            or not reference_attachment_data["path"].startswith("/uploads/")
-        ):
-            raise HTTPException(status_code=422, detail="参考图附件无效")
+        if not reference_attachment_data:
+            reference_attachment_data = [legacy_attachment]
+    if len(reference_attachment_data) > len(uploads) or any(
+        not isinstance(attachment, dict)
+        or not isinstance(attachment.get("path"), str)
+        or not attachment["path"].startswith("/uploads/")
+        for attachment in reference_attachment_data
+    ):
+        raise HTTPException(status_code=422, detail="参考图附件无效")
 
-    content_type = (reference_image.content_type or "").lower()
-    if content_type not in SUPPORTED_REFERENCE_IMAGE_TYPES:
-        raise HTTPException(status_code=415, detail="参考图仅支持 JPG、PNG 或 WebP")
-    reference_bytes = await reference_image.read(MAX_REFERENCE_IMAGE_SIZE + 1)
-    await reference_image.close()
-    if len(reference_bytes) > MAX_REFERENCE_IMAGE_SIZE:
-        raise HTTPException(status_code=413, detail="参考图不能超过 20MB")
-    if not reference_bytes:
-        raise HTTPException(status_code=422, detail="参考图内容为空")
+    references = [await read_reference_upload(image) for image in uploads]
+    while len(reference_attachment_data) < len(references):
+        reference_attachment_data.append(
+            await save_reference_upload(references[len(reference_attachment_data)])
+        )
+
+    if len(reference_attachment_data) != len(references):
+            raise HTTPException(status_code=422, detail="参考图附件无效")
 
     client = get_client(settings["image_api_key"], settings["image_base_url"])
     materials = load_materials(db, [str(item) for item in parsed_material_ids])
@@ -376,7 +439,7 @@ async def generate_image(
     vehicle = " / ".join(filter(None, [brand, car_model]))
     prompt_parts = [
         prompt,
-        "以用户上传的参考图为主要视觉依据，保留用户要求的主体、构图或氛围，不要无依据地改变产品结构。",
+        f"用户提供了 {len(references)} 张参考图。综合这些图片作为视觉依据，保留用户要求的主体、构图或氛围，不要无依据地改变产品结构。",
     ]
     if parsed_image_history:
         prompt_parts.append(
@@ -392,13 +455,13 @@ async def generate_image(
         prompt_parts.append("参考素材信息（仅用于理解主题，不要在画面中生成可读长文）：\n" + context[:8000])
 
     try:
+        image_inputs = [
+            (reference["filename"], reference["bytes"], reference["content_type"])
+            for reference in references
+        ]
         result = await client.images.edit(
             model=settings["image_model"],
-            image=(
-                reference_image.filename or "reference.png",
-                reference_bytes,
-                content_type,
-            ),
+            image=image_inputs[0] if len(image_inputs) == 1 else image_inputs,
             prompt="\n\n".join(prompt_parts),
             size=settings["image_size"],
             quality=settings["image_quality"],
@@ -431,23 +494,6 @@ async def generate_image(
     async with aiofiles.open(filepath, "wb") as output:
         await output.write(image_bytes)
 
-    if reference_attachment_data is None:
-        reference_extension = {
-            "image/jpeg": ".jpg",
-            "image/png": ".png",
-            "image/webp": ".webp",
-        }[content_type]
-        reference_filename = f"ai-reference-{uuid.uuid4().hex}{reference_extension}"
-        reference_filepath = os.path.join(UPLOAD_DIR, reference_filename)
-        async with aiofiles.open(reference_filepath, "wb") as output:
-            await output.write(reference_bytes)
-        reference_attachment_data = {
-            "name": reference_image.filename or f"参考图{reference_extension}",
-            "path": f"/uploads/{reference_filename}",
-            "type": content_type,
-            "size": len(reference_bytes),
-        }
-
     return {
         "attachment": {
             "name": "AI 生成配图.png",
@@ -455,5 +501,6 @@ async def generate_image(
             "type": "image/png",
             "size": len(image_bytes),
         },
-        "reference_attachment": reference_attachment_data,
+        "reference_attachments": reference_attachment_data,
+        "reference_attachment": reference_attachment_data[0],
     }

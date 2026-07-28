@@ -52,10 +52,12 @@ import {
   getOptions,
   streamAiChat,
   submitAiFeedback,
+  uploadAiReferenceImages,
   updateCreation,
   type Creation,
   type AiMessage,
   type AiImageMessage,
+  type AiImageThread,
   type AiStatus,
   type AiTask,
   type Attachment,
@@ -79,6 +81,22 @@ const MATERIAL_FILTERS: { value: "all" | MaterialScope; label: string }[] = [
   { value: "vehicle", label: "车型" },
   { value: "general", label: "灵感" },
 ]
+
+const MAX_IMAGE_REFERENCES = 8
+
+function createImageThread(index: number, id = `image-thread-${Date.now()}-${index}`): AiImageThread {
+  const now = new Date().toISOString()
+  return {
+    id,
+    title: `图片对话 ${index}`,
+    image_prompt: "",
+    selected_references: [],
+    generated_images: [],
+    messages: [],
+    created_at: now,
+    updated_at: now,
+  }
+}
 
 function deriveTitle(content: string, carModel: string) {
   const firstLine = content
@@ -114,14 +132,13 @@ export default function AiStudioPage() {
   const [input, setInput] = useState("")
   const [streaming, setStreaming] = useState(false)
   const [chatError, setChatError] = useState("")
-  const [imagePrompt, setImagePrompt] = useState("")
-  const [referenceImage, setReferenceImage] = useState<File | null>(null)
-  const [referencePreview, setReferencePreview] = useState("")
-  const [referenceAttachment, setReferenceAttachment] = useState<Attachment | null>(null)
-  const [generatingImage, setGeneratingImage] = useState(false)
-  const [generatedImages, setGeneratedImages] = useState<Attachment[]>([])
-  const [imageMessages, setImageMessages] = useState<AiImageMessage[]>([])
-  const [loadingReferencePath, setLoadingReferencePath] = useState("")
+  const [imageThreads, setImageThreads] = useState<AiImageThread[]>(() => [
+    createImageThread(1, "image-thread-1"),
+  ])
+  const [activeImageThreadId, setActiveImageThreadId] = useState("image-thread-1")
+  const [uploadedReferenceImages, setUploadedReferenceImages] = useState<Attachment[]>([])
+  const [generatingImageThreadId, setGeneratingImageThreadId] = useState<string | null>(null)
+  const [uploadingReferences, setUploadingReferences] = useState(false)
   const [noteTitle, setNoteTitle] = useState("")
   const [saving, setSaving] = useState(false)
   const [savedCreation, setSavedCreation] = useState<Creation | null>(null)
@@ -166,16 +183,40 @@ export default function AiStudioPage() {
           result.status === "fulfilled" ? [result.value] : []
         )
 
-        let restoredReference: File | null = null
-        const referenceAttachment = conversation.reference_image_attachment ?? null
-        const activeReferenceAttachment = conversation.active_reference_attachment ?? referenceAttachment
-        if (activeReferenceAttachment) {
-          try {
-            restoredReference = await attachmentToFile(activeReferenceAttachment)
-          } catch {
-            restoredReference = null
-          }
-        }
+        const legacyReference = conversation.active_reference_attachment
+          ?? conversation.reference_image_attachment
+          ?? null
+        const restoredThreads = conversation.image_threads?.length
+          ? conversation.image_threads.map((thread, index) => ({
+              ...thread,
+              id: thread.id || `restored-image-thread-${index + 1}`,
+              title: thread.title || `图片对话 ${index + 1}`,
+              image_prompt: thread.image_prompt || "",
+              selected_references: thread.selected_references || [],
+              generated_images: thread.generated_images || [],
+              messages: thread.messages || [],
+              created_at: thread.created_at || creation.created_at,
+              updated_at: thread.updated_at || creation.updated_at,
+            }))
+          : [{
+              ...createImageThread(1, "legacy-image-thread"),
+              image_prompt: conversation.image_prompt || "",
+              selected_references: legacyReference ? [legacyReference] : [],
+              generated_images: conversation.generated_images || [],
+              messages: conversation.image_messages || (conversation.generated_images || []).map((image, index) => ({
+                id: `restored-image-${index}`,
+                role: "assistant" as const,
+                content: `历史生成结果 ${index + 1}`,
+                image,
+              })),
+              created_at: creation.created_at,
+              updated_at: creation.updated_at,
+            }]
+        const restoredActiveThreadId = restoredThreads.some(
+          (thread) => thread.id === conversation.active_image_thread_id
+        )
+          ? conversation.active_image_thread_id!
+          : restoredThreads[0].id
 
         if (!active) return
         setResumedCreationId(creation.id)
@@ -187,17 +228,9 @@ export default function AiStudioPage() {
         setMaterialSearch(conversation.material_search || "")
         setSelectedBrand(conversation.brand || "")
         setSelectedCarModel(conversation.car_model || "")
-        setImagePrompt(conversation.image_prompt || "")
-        setGeneratedImages(conversation.generated_images || [])
-        setImageMessages(conversation.image_messages || (conversation.generated_images || []).map((image, index) => ({
-          id: `restored-image-${index}`,
-          role: "assistant" as const,
-          content: `历史生成结果 ${index + 1}`,
-          image,
-        })))
-        setReferenceAttachment(activeReferenceAttachment)
-        setReferenceImage(restoredReference)
-        setReferencePreview(restoredReference && activeReferenceAttachment ? activeReferenceAttachment.path : "")
+        setImageThreads(restoredThreads)
+        setActiveImageThreadId(restoredActiveThreadId)
+        setUploadedReferenceImages(conversation.uploaded_reference_images || [])
         setNoteTitle(creation.title)
         setSavedCreation(null)
       })
@@ -239,10 +272,6 @@ export default function AiStudioPage() {
     }
   }, [deferredSearch, scopeFilter, selectedBrand, selectedCarModel])
 
-  useEffect(() => () => {
-    if (referencePreview.startsWith("blob:")) URL.revokeObjectURL(referencePreview)
-  }, [referencePreview])
-
   const brands = useMemo(
     () => Array.from(new Set(vehicles.map((vehicle) => vehicle.brand))),
     [vehicles]
@@ -266,8 +295,43 @@ export default function AiStudioPage() {
         seen.add(attachment.path)
         return true
       })
-      .map((attachment) => ({ attachment, materialTitle: material.title })))
+      .map((attachment) => ({ attachment, label: material.title })))
   }, [selectedMaterials])
+  const activeImageThread = useMemo(
+    () => imageThreads.find((thread) => thread.id === activeImageThreadId) ?? imageThreads[0],
+    [activeImageThreadId, imageThreads]
+  )
+  const imageMessages = activeImageThread?.messages ?? []
+  const imagePrompt = activeImageThread?.image_prompt ?? ""
+  const selectedImageReferences = activeImageThread?.selected_references ?? []
+  const activeGeneratedImages = activeImageThread?.generated_images ?? []
+  const generatedImages = useMemo(() => Array.from(new Map(
+    imageThreads
+      .flatMap((thread) => thread.generated_images)
+      .map((attachment) => [attachment.path, attachment])
+  ).values()), [imageThreads])
+  const generatedImageSources = useMemo(() => imageThreads.flatMap((thread) =>
+    thread.generated_images.map((attachment) => ({ attachment, label: thread.title }))
+  ), [imageThreads])
+  const uploadedReferenceSources = useMemo(() => uploadedReferenceImages.map((attachment) => ({
+    attachment,
+    label: "本次上传",
+  })), [uploadedReferenceImages])
+  const historicalReferenceImages = useMemo(() => {
+    const visiblePaths = new Set([
+      ...selectedMaterialImages.map(({ attachment }) => attachment.path),
+      ...uploadedReferenceImages.map((attachment) => attachment.path),
+      ...generatedImages.map((attachment) => attachment.path),
+    ])
+    const historical = imageThreads.flatMap((thread) => [
+      ...thread.selected_references,
+      ...thread.messages.flatMap((message) => message.references ?? (message.reference ? [message.reference] : [])),
+    ])
+    return Array.from(new Map(historical
+      .filter((attachment) => !visiblePaths.has(attachment.path))
+      .map((attachment) => [attachment.path, { attachment, label: "历史参考" }])
+    ).values())
+  }, [generatedImages, imageThreads, selectedMaterialImages, uploadedReferenceImages])
   const latestAssistant = useMemo(
     () => messages.slice().reverse().find((message) => message.role === "assistant" && message.content)?.content ?? "",
     [messages]
@@ -279,7 +343,7 @@ export default function AiStudioPage() {
   const selectedTask = TASKS.find((item) => item.value === task) ?? TASKS[0]
   const chatReady = Boolean(status?.chat_configured)
   const imageReady = Boolean(status?.image_configured)
-  const hasImageResults = imageMessages.some((message) => message.role === "assistant" && message.image)
+  const hasImageResults = generatedImages.length > 0
   const canSaveIdea = Boolean(latestAssistant || hasImageResults)
 
   const toggleMaterial = (material: Material) => {
@@ -290,34 +354,92 @@ export default function AiStudioPage() {
     )
   }
 
-  const selectReferenceImage = (file: File | null) => {
-    if (file && !["image/jpeg", "image/png", "image/webp"].includes(file.type)) {
+  const updateImageThread = (
+    threadId: string,
+    updater: (thread: AiImageThread) => AiImageThread
+  ) => {
+    setImageThreads((current) => current.map((thread) =>
+      thread.id === threadId ? updater(thread) : thread
+    ))
+  }
+
+  const handleImagePromptChange = (value: string) => {
+    if (!activeImageThread) return
+    updateImageThread(activeImageThread.id, (thread) => ({
+      ...thread,
+      image_prompt: value,
+      updated_at: new Date().toISOString(),
+    }))
+  }
+
+  const toggleReferenceAttachment = (attachment: Attachment) => {
+    if (!activeImageThread) return
+    const isSelected = activeImageThread.selected_references.some(
+      (reference) => reference.path === attachment.path
+    )
+    if (!isSelected && activeImageThread.selected_references.length >= MAX_IMAGE_REFERENCES) {
+      setChatError(`每轮最多选择 ${MAX_IMAGE_REFERENCES} 张参考图`)
+      return
+    }
+    setChatError("")
+    updateImageThread(activeImageThread.id, (thread) => ({
+      ...thread,
+      selected_references: isSelected
+        ? thread.selected_references.filter((reference) => reference.path !== attachment.path)
+        : [...thread.selected_references, attachment],
+      updated_at: new Date().toISOString(),
+    }))
+  }
+
+  const handleUploadReferenceImages = async (files: File[]) => {
+    if (!activeImageThread || uploadingReferences) return
+    if (files.length > MAX_IMAGE_REFERENCES) {
+      setChatError(`每次最多上传 ${MAX_IMAGE_REFERENCES} 张参考图`)
+      return
+    }
+    const invalidType = files.find((file) => !["image/jpeg", "image/png", "image/webp"].includes(file.type))
+    if (invalidType) {
       setChatError("参考图仅支持 JPG、PNG 或 WebP")
       return
     }
-    if (file && file.size > 20 * 1024 * 1024) {
-      setChatError("参考图不能超过 20MB")
+    const oversized = files.find((file) => file.size > 20 * 1024 * 1024)
+    if (oversized) {
+      setChatError("单张参考图不能超过 20MB")
       return
     }
-    setChatError("")
-    setReferenceAttachment(null)
-    setReferenceImage(file)
-    setReferencePreview(file ? URL.createObjectURL(file) : "")
-  }
 
-  const selectReferenceAttachment = async (attachment: Attachment) => {
-    setLoadingReferencePath(attachment.path)
+    const targetThreadId = activeImageThread.id
+    setUploadingReferences(true)
     setChatError("")
     try {
-      const file = await attachmentToFile(attachment)
-      setReferenceAttachment(attachment)
-      setReferenceImage(file)
-      setReferencePreview(attachment.path)
+      const result = await uploadAiReferenceImages(files)
+      setUploadedReferenceImages((current) => Array.from(new Map(
+        [...current, ...result.attachments].map((attachment) => [attachment.path, attachment])
+      ).values()))
+      updateImageThread(targetThreadId, (thread) => {
+        const existingPaths = new Set(thread.selected_references.map((attachment) => attachment.path))
+        const availableSlots = MAX_IMAGE_REFERENCES - thread.selected_references.length
+        const additions = result.attachments
+          .filter((attachment) => !existingPaths.has(attachment.path))
+          .slice(0, availableSlots)
+        return {
+          ...thread,
+          selected_references: [...thread.selected_references, ...additions],
+          updated_at: new Date().toISOString(),
+        }
+      })
     } catch (error) {
-      setChatError(error instanceof Error ? error.message : "参考图加载失败")
+      setChatError(error instanceof Error ? error.message : "参考图上传失败")
     } finally {
-      setLoadingReferencePath("")
+      setUploadingReferences(false)
     }
+  }
+
+  const handleCreateImageThread = () => {
+    const nextThread = createImageThread(imageThreads.length + 1)
+    setImageThreads((current) => [...current, nextThread])
+    setActiveImageThreadId(nextThread.id)
+    setChatError("")
   }
 
   const handleSend = async (event: FormEvent) => {
@@ -365,23 +487,33 @@ export default function AiStudioPage() {
   }
 
   const handleGenerateImage = async () => {
-    const prompt = imagePrompt.trim()
-    if (!prompt || !referenceImage || !imageReady || generatingImage) return
+    if (!activeImageThread || generatingImageThreadId) return
+    const prompt = activeImageThread.image_prompt.trim()
+    const references = activeImageThread.selected_references
+    if (!prompt || references.length === 0 || !imageReady) return
+    const targetThreadId = activeImageThread.id
     const userMessage: AiImageMessage = {
       id: crypto.randomUUID(),
       role: "user",
       content: prompt,
+      references,
+      reference: references[0],
     }
-    setImageMessages((current) => [...current, userMessage])
-    setGeneratingImage(true)
+    updateImageThread(targetThreadId, (thread) => ({
+      ...thread,
+      messages: [...thread.messages, userMessage],
+      updated_at: new Date().toISOString(),
+    }))
+    setGeneratingImageThreadId(targetThreadId)
     setChatError("")
     setSavedCreation(null)
     try {
+      const referenceFiles = await Promise.all(references.map((attachment) => attachmentToFile(attachment)))
       const result = await generateAiImage({
         prompt,
-        reference_image: referenceImage,
-        reference_attachment: referenceAttachment,
-        history: imageMessages
+        reference_images: referenceFiles,
+        reference_attachments: references,
+        history: activeImageThread.messages
           .filter((message) => message.role === "user")
           .map((message) => message.content),
         brand: selectedBrand,
@@ -389,32 +521,35 @@ export default function AiStudioPage() {
         material_ids: selectedMaterialIds,
       })
       const attachment = result.attachment
-      setGeneratedImages((current) => [...current, attachment])
-      setImageMessages((current) => [
-        ...current.map((message) => message.id === userMessage.id
-          ? { ...message, reference: result.reference_attachment }
-          : message),
-        {
-          id: crypto.randomUUID(),
-          role: "assistant",
-          content: `已生成第 ${current.filter((message) => message.role === "assistant" && message.image).length + 1} 版`,
-          image: attachment,
-        },
-      ])
-      setImagePrompt("")
-      try {
-        const nextReference = await attachmentToFile(attachment)
-        setReferenceAttachment(attachment)
-        setReferenceImage(nextReference)
-        setReferencePreview(attachment.path)
-      } catch {
-        setChatError("图片已生成，但暂时无法载入为下一轮参考图")
-      }
+      const persistedReferences = result.reference_attachments?.length
+        ? result.reference_attachments
+        : references
+      updateImageThread(targetThreadId, (thread) => ({
+        ...thread,
+        image_prompt: "",
+        generated_images: [...thread.generated_images, attachment],
+        messages: [
+          ...thread.messages.map((message) => message.id === userMessage.id
+            ? { ...message, references: persistedReferences, reference: persistedReferences[0] }
+            : message),
+          {
+            id: crypto.randomUUID(),
+            role: "assistant" as const,
+            content: `已生成第 ${thread.generated_images.length + 1} 版`,
+            image: attachment,
+          },
+        ],
+        updated_at: new Date().toISOString(),
+      }))
     } catch (error) {
-      setImageMessages((current) => current.filter((message) => message.id !== userMessage.id))
+      updateImageThread(targetThreadId, (thread) => ({
+        ...thread,
+        messages: thread.messages.filter((message) => message.id !== userMessage.id),
+        updated_at: new Date().toISOString(),
+      }))
       setChatError(error instanceof Error ? error.message : "AI 图片生成失败")
     } finally {
-      setGeneratingImage(false)
+      setGeneratingImageThreadId(null)
     }
   }
 
@@ -443,14 +578,16 @@ export default function AiStudioPage() {
 
   const handleSave = async () => {
     if (!canSaveIdea || saving) return
-    const imageRequirements = imageMessages
+    const imageRequirements = imageThreads
+      .flatMap((thread) => thread.messages)
       .filter((message) => message.role === "user")
       .map((message) => message.content)
       .join("\n")
     const savedContent = latestAssistant || imageRequirements || "图片创作灵感"
     const title = noteTitle.trim() || deriveTitle(savedContent, selectedCarModel)
+    const activeReference = activeImageThread?.selected_references[0] ?? null
     const conversation = {
-      version: 1 as const,
+      version: 2 as const,
       task,
       messages,
       selected_material_ids: selectedMaterialIds,
@@ -461,19 +598,25 @@ export default function AiStudioPage() {
       image_prompt: imagePrompt,
       generated_images: generatedImages,
       image_messages: imageMessages,
-      reference_image_attachment: referenceAttachment,
-      active_reference_attachment: referenceAttachment,
+      reference_image_attachment: activeReference,
+      active_reference_attachment: activeReference,
+      image_threads: imageThreads,
+      active_image_thread_id: activeImageThreadId,
+      uploaded_reference_images: uploadedReferenceImages,
       prompt_version: status?.prompt_version ?? null,
       saved_at: new Date().toISOString(),
     }
-    const conversationAttachments = imageMessages.flatMap((message) => [
-      ...(message.reference ? [message.reference] : []),
-      ...(message.image ? [message.image] : []),
+    const conversationAttachments = imageThreads.flatMap((thread) => [
+      ...thread.selected_references,
+      ...thread.messages.flatMap((message) => [
+        ...(message.references ?? (message.reference ? [message.reference] : [])),
+        ...(message.image ? [message.image] : []),
+      ]),
     ])
     const retainedAttachments = Array.from(new Map([
       ...generatedImages,
+      ...uploadedReferenceImages,
       ...conversationAttachments,
-      ...(referenceAttachment ? [referenceAttachment] : []),
     ].map((attachment) => [attachment.path, attachment])).values())
     const formData = new FormData()
     formData.append("title", title)
@@ -487,9 +630,6 @@ export default function AiStudioPage() {
     ].filter(Boolean)))
     formData.append("attachments", JSON.stringify(retainedAttachments))
     formData.append("ai_conversation", JSON.stringify(conversation))
-    if (referenceImage && !referenceAttachment) {
-      formData.append("files", referenceImage, referenceImage.name)
-    }
 
     setSaving(true)
     setChatError("")
@@ -500,11 +640,6 @@ export default function AiStudioPage() {
       setSavedCreation(saved)
       setResumedCreationId(saved.id)
       setResumedTitle(saved.title)
-      const savedReference = saved.ai_conversation?.active_reference_attachment
-        ?? saved.ai_conversation?.reference_image_attachment
-        ?? null
-      setReferenceAttachment(savedReference)
-      if (savedReference) setReferencePreview(savedReference.path)
       setNoteTitle(title)
       window.history.replaceState({}, "", `/ai?resume=${saved.id}`)
     } catch (error) {
@@ -724,10 +859,11 @@ export default function AiStudioPage() {
               setSelectedBrand("")
               setSelectedCarModel("")
               setMaterialsLoading(true)
-              setGeneratedImages([])
-              setImageMessages([])
-              selectReferenceImage(null)
-              setImagePrompt("")
+              const firstImageThread = createImageThread(1)
+              setImageThreads([firstImageThread])
+              setActiveImageThreadId(firstImageThread.id)
+              setUploadedReferenceImages([])
+              setGeneratingImageThreadId(null)
               setNoteTitle("")
               setSavedCreation(null)
               setFeedbackChoice(null)
@@ -755,7 +891,7 @@ export default function AiStudioPage() {
         {resumedCreationId && (
           <div className="mb-5 flex items-start gap-2 border-y border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-900">
             <History className="mt-0.5 size-4 shrink-0" />
-            <span>正在继续“{resumedTitle}”，已恢复 {messages.length} 条文案对话和 {imageMessages.length} 条图片记录</span>
+            <span>正在继续“{resumedTitle}”，已恢复 {messages.length} 条文案对话和 {imageThreads.length} 个图片对话</span>
           </div>
         )}
 
@@ -918,19 +1054,30 @@ export default function AiStudioPage() {
           <aside className="space-y-5 lg:col-span-2 xl:col-span-1" aria-label="生成与保存">
             <AiImageWorkspace
               selectedMaterialImages={selectedMaterialImages}
-              referenceAttachment={referenceAttachment}
-              referencePreview={referencePreview}
-              loadingReferencePath={loadingReferencePath}
+              uploadedReferenceImages={uploadedReferenceSources}
+              historicalReferenceImages={historicalReferenceImages}
+              generatedImageSources={generatedImageSources}
+              imageThreads={imageThreads.map((thread) => ({
+                id: thread.id,
+                title: thread.title,
+                generationCount: thread.generated_images.length,
+                isGenerating: generatingImageThreadId === thread.id,
+              }))}
+              activeThreadId={activeImageThreadId}
+              selectedReferences={selectedImageReferences}
               imageMessages={imageMessages}
-              generatedImages={generatedImages}
-              generatingImage={generatingImage}
+              generatedImages={activeGeneratedImages}
+              generatingImage={generatingImageThreadId === activeImageThreadId}
+              imageGenerationBusy={Boolean(generatingImageThreadId)}
+              uploadingReferences={uploadingReferences}
               imagePrompt={imagePrompt}
               imageReady={imageReady}
-              hasReferenceImage={Boolean(referenceImage)}
               latestAssistant={latestAssistant}
-              onSelectReferenceAttachment={selectReferenceAttachment}
-              onSelectReferenceImage={selectReferenceImage}
-              onImagePromptChange={setImagePrompt}
+              onSelectThread={setActiveImageThreadId}
+              onCreateThread={handleCreateImageThread}
+              onToggleReferenceAttachment={toggleReferenceAttachment}
+              onUploadReferenceImages={handleUploadReferenceImages}
+              onImagePromptChange={handleImagePromptChange}
               onGenerateImage={handleGenerateImage}
             />
 
