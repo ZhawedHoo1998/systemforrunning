@@ -1,11 +1,16 @@
+import os
+
+from dotenv import load_dotenv
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import JSONResponse
-import os
+
+PROJECT_DIR = os.path.dirname(os.path.dirname(__file__))
+load_dotenv(os.path.join(PROJECT_DIR, ".env"))
+load_dotenv(os.path.join(os.path.dirname(__file__), ".env"))
 
 from backend.database import engine, Base, migrate_material_scope
-from backend.routers import materials
+from backend.routers import ai, materials
 
 Base.metadata.create_all(bind=engine)
 migrate_material_scope()
@@ -25,6 +30,7 @@ os.makedirs(UPLOAD_DIR, exist_ok=True)
 app.mount("/uploads", StaticFiles(directory=UPLOAD_DIR), name="uploads")
 
 app.include_router(materials.router)
+app.include_router(ai.router)
 
 
 @app.get("/api/health")

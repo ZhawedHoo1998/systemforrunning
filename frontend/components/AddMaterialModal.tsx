@@ -12,6 +12,7 @@ import { Textarea } from "@/components/ui/textarea"
 import { cn } from "@/lib/utils"
 
 const SOURCE_TYPES = [
+  { value: "ai_generated", label: "AI 生成" },
   { value: "self_experience", label: "自家经验" },
   { value: "product资料", label: "产品资料" },
   { value: "customer_feedback", label: "客户反馈" },

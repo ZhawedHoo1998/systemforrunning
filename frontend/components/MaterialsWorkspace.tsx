@@ -102,7 +102,7 @@ export function MaterialsWorkspace({ scope }: MaterialsWorkspaceProps) {
         if (!active) return
         setOptions(result)
 
-        if (isVehicleWorkspace && !selectedBrand && !selectedCarModel) {
+        if (isVehicleWorkspace) {
           try {
             const saved = JSON.parse(localStorage.getItem(LAST_VEHICLE_KEY) ?? "null") as {
               brand?: string
@@ -126,7 +126,7 @@ export function MaterialsWorkspace({ scope }: MaterialsWorkspaceProps) {
     return () => {
       active = false
     }
-  }, [isVehicleWorkspace, refreshKey, selectedBrand, selectedCarModel])
+  }, [isVehicleWorkspace, refreshKey])
 
   useEffect(() => {
     if (!canLoadMaterials) {
@@ -310,7 +310,7 @@ export function MaterialsWorkspace({ scope }: MaterialsWorkspaceProps) {
                   }}
                   disabled={brands.length === 0}
                 >
-                  <SelectTrigger className="h-10 bg-background shadow-none">
+                  <SelectTrigger className="h-10 bg-background shadow-none" aria-label="选择品牌">
                     <SelectValue placeholder={brands.length === 0 ? "暂无品牌" : "选择品牌"} />
                   </SelectTrigger>
                   <SelectContent>
@@ -325,7 +325,7 @@ export function MaterialsWorkspace({ scope }: MaterialsWorkspaceProps) {
                   onValueChange={(carModel) => handleVehicleChange(selectedBrand, carModel)}
                   disabled={!selectedBrand || carModels.length === 0}
                 >
-                  <SelectTrigger className="h-10 bg-background shadow-none">
+                  <SelectTrigger className="h-10 bg-background shadow-none" aria-label="选择车型">
                     <SelectValue placeholder={!selectedBrand ? "请先选择品牌" : carModels.length === 0 ? "暂无车型" : "选择车型"} />
                   </SelectTrigger>
                   <SelectContent>

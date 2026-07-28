@@ -71,6 +71,36 @@ export interface VehicleOption {
   car_model: string
 }
 
+export type AiTask = "title" | "note" | "video" | "rewrite"
+
+export interface AiMessage {
+  role: "user" | "assistant"
+  content: string
+}
+
+export interface AiStatus {
+  sdk_installed: boolean
+  chat_configured: boolean
+  image_configured: boolean
+  text_model: string | null
+  image_model: string | null
+}
+
+export interface AiChatRequest {
+  task: AiTask
+  brand?: string
+  car_model?: string
+  material_ids: string[]
+  messages: AiMessage[]
+}
+
+export interface AiImageRequest {
+  prompt: string
+  brand?: string
+  car_model?: string
+  material_ids: string[]
+}
+
 export async function getMaterials(params: {
   q?: string
   material_scope?: MaterialScope
@@ -171,4 +201,58 @@ export async function getMaterialFacets(params: {
   const res = await fetch(`${API_BASE}/api/materials/facets?${sp.toString()}`)
   if (!res.ok) await throwApiError(res, "素材分类统计加载失败")
   return res.json()
+}
+
+export async function getAiStatus(): Promise<AiStatus> {
+  const res = await fetch(`${API_BASE}/api/ai/status`)
+  if (!res.ok) await throwApiError(res, "AI 配置状态加载失败")
+  return res.json()
+}
+
+export async function streamAiChat(
+  payload: AiChatRequest,
+  onDelta: (delta: string) => void,
+): Promise<void> {
+  const res = await fetch(`${API_BASE}/api/ai/chat`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  })
+  if (!res.ok) await throwApiError(res, "AI 对话请求失败")
+  if (!res.body) throw new Error("浏览器不支持流式响应")
+
+  const reader = res.body.getReader()
+  const decoder = new TextDecoder()
+  let buffer = ""
+
+  while (true) {
+    const { done, value } = await reader.read()
+    if (done) break
+    buffer += decoder.decode(value, { stream: true })
+    const events = buffer.split("\n\n")
+    buffer = events.pop() ?? ""
+
+    for (const event of events) {
+      const dataLine = event.split("\n").find((line) => line.startsWith("data: "))
+      if (!dataLine) continue
+      const data = JSON.parse(dataLine.slice(6)) as {
+        type: "delta" | "done" | "error"
+        delta?: string
+        message?: string
+      }
+      if (data.type === "delta" && data.delta) onDelta(data.delta)
+      if (data.type === "error") throw new Error(data.message || "AI 对话请求失败")
+    }
+  }
+}
+
+export async function generateAiImage(payload: AiImageRequest): Promise<Attachment> {
+  const res = await fetch(`${API_BASE}/api/ai/images`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  })
+  if (!res.ok) await throwApiError(res, "AI 图片生成失败")
+  const result = await res.json() as { attachment: Attachment }
+  return result.attachment
 }

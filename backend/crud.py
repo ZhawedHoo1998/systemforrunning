@@ -12,6 +12,7 @@ CONTENT_TYPES = [
     "车型知识",
     "产品卖点",
     "用户案例",
+    "笔记灵感",
     "爆款参考",
     "竞品种草",
     "标题灵感",
@@ -30,6 +31,7 @@ VEHICLE_CONTENT_TYPES = [
 ]
 
 GENERAL_CONTENT_TYPES = [
+    "笔记灵感",
     "爆款参考",
     "标题灵感",
     "视频灵感",
@@ -37,6 +39,7 @@ GENERAL_CONTENT_TYPES = [
 ]
 
 SOURCE_TYPES = [
+    ("ai_generated", "AI 生成"),
     ("self_experience", "自家经验"),
     ("product资料", "产品资料"),
     ("customer_feedback", "客户反馈"),
