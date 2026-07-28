@@ -78,6 +78,7 @@ def material_to_dict(material):
         "suggest_title": material.suggest_title,
         "tags": material.tags or [],
         "attachments": material.attachments or [],
+        "ai_conversation": material.ai_conversation,
         "is_favorite": material.is_favorite,
         "created_at": material.created_at.isoformat() if material.created_at else None,
         "updated_at": material.updated_at.isoformat() if material.updated_at else None,
@@ -109,6 +110,18 @@ def parse_json_list(value: str, field_label: str):
         raise HTTPException(status_code=422, detail=f"{field_label}格式不正确") from error
     if not isinstance(parsed, list):
         raise HTTPException(status_code=422, detail=f"{field_label}必须是列表")
+    return parsed
+
+
+def parse_json_object(value: str, field_label: str):
+    if len(value.encode("utf-8")) > 2 * 1024 * 1024:
+        raise HTTPException(status_code=413, detail=f"{field_label}不能超过 2MB")
+    try:
+        parsed = json.loads(value)
+    except (json.JSONDecodeError, TypeError) as error:
+        raise HTTPException(status_code=422, detail=f"{field_label}格式不正确") from error
+    if not isinstance(parsed, dict):
+        raise HTTPException(status_code=422, detail=f"{field_label}必须是对象")
     return parsed
 
 
@@ -267,6 +280,7 @@ async def create_material(
     suggest_title: Optional[str] = Form(None),
     tags: str = Form("[]"),
     attachments: str = Form("[]"),
+    ai_conversation: Optional[str] = Form(None),
     is_favorite: bool = Form(False),
     files: List[UploadFile] = File(default=[]),
     db: Session = Depends(get_db),
@@ -274,9 +288,17 @@ async def create_material(
     content_types_list = parse_json_list(content_types, "内容类型")
     tags_list = parse_json_list(tags, "标签")
     attachments_list = parse_json_list(attachments, "附件")
+    ai_conversation_data = (
+        parse_json_object(ai_conversation, "AI 会话")
+        if ai_conversation is not None
+        else None
+    )
     brand, car_model = normalize_scope_fields(material_scope, brand, car_model)
 
     uploaded_attachments = await save_uploads(files)
+
+    if ai_conversation_data is not None and uploaded_attachments:
+        ai_conversation_data["reference_image_attachment"] = uploaded_attachments[-1]
 
     all_attachments = attachments_list + uploaded_attachments
 
@@ -297,6 +319,7 @@ async def create_material(
         "suggest_title": suggest_title,
         "tags": tags_list,
         "attachments": all_attachments,
+        "ai_conversation": ai_conversation_data,
         "is_favorite": is_favorite,
     }
 
@@ -323,6 +346,7 @@ async def update_material(
     suggest_title: Optional[str] = Form(None),
     tags: Optional[str] = Form(None),
     attachments: Optional[str] = Form(None),
+    ai_conversation: Optional[str] = Form(None),
     files: List[UploadFile] = File(default=[]),
     db: Session = Depends(get_db),
 ):
@@ -367,6 +391,11 @@ async def update_material(
     if tags is not None:
         material_data["tags"] = parse_json_list(tags, "标签")
     uploaded_attachments = await save_uploads(files)
+    if ai_conversation is not None:
+        ai_conversation_data = parse_json_object(ai_conversation, "AI 会话")
+        if uploaded_attachments:
+            ai_conversation_data["reference_image_attachment"] = uploaded_attachments[-1]
+        material_data["ai_conversation"] = ai_conversation_data
     if attachments is not None or uploaded_attachments:
         retained_attachments = (
             parse_json_list(attachments, "附件")

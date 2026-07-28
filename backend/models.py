@@ -24,6 +24,23 @@ class Material(Base):
     suggest_title = Column(Text, nullable=True)
     tags = Column(JSON, default=list)
     attachments = Column(JSON, default=list)
+    ai_conversation = Column(JSON, nullable=True)
     is_favorite = Column(Boolean, default=False)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class AiFeedback(Base):
+    __tablename__ = "ai_feedback"
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    task = Column(String(30), nullable=False)
+    rating = Column(String(20), nullable=False)
+    comment = Column(Text, nullable=True)
+    idea = Column(Text, nullable=True)
+    assistant_content = Column(Text, nullable=False)
+    material_ids = Column(JSON, default=list)
+    brand = Column(String(200), nullable=True)
+    car_model = Column(String(200), nullable=True)
+    prompt_version = Column(String(100), nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow, index=True)

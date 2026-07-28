@@ -40,6 +40,20 @@ def migrate_material_scope():
         """))
 
 
+def migrate_material_ai_conversation():
+    """Add persisted AI conversation state to existing material databases."""
+    inspector = inspect(engine)
+    if "materials" not in inspector.get_table_names():
+        return
+
+    columns = {column["name"] for column in inspector.get_columns("materials")}
+    if "ai_conversation" not in columns:
+        with engine.begin() as connection:
+            connection.execute(text(
+                "ALTER TABLE materials ADD COLUMN ai_conversation JSON"
+            ))
+
+
 def get_db():
     db = SessionLocal()
     try:

@@ -9,11 +9,17 @@ PROJECT_DIR = os.path.dirname(os.path.dirname(__file__))
 load_dotenv(os.path.join(PROJECT_DIR, ".env"))
 load_dotenv(os.path.join(os.path.dirname(__file__), ".env"))
 
-from backend.database import engine, Base, migrate_material_scope
+from backend.database import (
+    Base,
+    engine,
+    migrate_material_ai_conversation,
+    migrate_material_scope,
+)
 from backend.routers import ai, materials
 
 Base.metadata.create_all(bind=engine)
 migrate_material_scope()
+migrate_material_ai_conversation()
 
 app = FastAPI(title="Ruby Rain 香氛素材库 API", version="1.0.0")
 

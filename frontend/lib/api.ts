@@ -33,6 +33,7 @@ export interface Material {
   suggest_title: string | null
   tags: string[]
   attachments: Attachment[]
+  ai_conversation: AiConversation | null
   is_favorite: boolean
   created_at: string
   updated_at: string
@@ -71,11 +72,27 @@ export interface VehicleOption {
   car_model: string
 }
 
-export type AiTask = "title" | "note" | "video" | "rewrite"
+export type AiTask = "concept" | "title" | "note" | "video" | "rewrite"
 
 export interface AiMessage {
   role: "user" | "assistant"
   content: string
+}
+
+export interface AiConversation {
+  version: 1
+  task: AiTask
+  messages: AiMessage[]
+  selected_material_ids: string[]
+  scope_filter: "all" | MaterialScope
+  material_search: string
+  brand: string | null
+  car_model: string | null
+  image_prompt: string
+  generated_images: Attachment[]
+  reference_image_attachment?: Attachment | null
+  prompt_version: string | null
+  saved_at: string
 }
 
 export interface AiStatus {
@@ -84,6 +101,7 @@ export interface AiStatus {
   image_configured: boolean
   text_model: string | null
   image_model: string | null
+  prompt_version: string
 }
 
 export interface AiChatRequest {
@@ -96,9 +114,21 @@ export interface AiChatRequest {
 
 export interface AiImageRequest {
   prompt: string
+  reference_image: File
   brand?: string
   car_model?: string
   material_ids: string[]
+}
+
+export interface AiFeedbackRequest {
+  task: AiTask
+  rating: "helpful" | "unhelpful"
+  comment?: string
+  idea?: string
+  assistant_content: string
+  material_ids: string[]
+  brand?: string
+  car_model?: string
 }
 
 export async function getMaterials(params: {
@@ -247,12 +277,27 @@ export async function streamAiChat(
 }
 
 export async function generateAiImage(payload: AiImageRequest): Promise<Attachment> {
+  const formData = new FormData()
+  formData.append("prompt", payload.prompt)
+  formData.append("reference_image", payload.reference_image)
+  formData.append("material_ids", JSON.stringify(payload.material_ids))
+  if (payload.brand) formData.append("brand", payload.brand)
+  if (payload.car_model) formData.append("car_model", payload.car_model)
+
   const res = await fetch(`${API_BASE}/api/ai/images`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload),
+    body: formData,
   })
   if (!res.ok) await throwApiError(res, "AI 图片生成失败")
   const result = await res.json() as { attachment: Attachment }
   return result.attachment
+}
+
+export async function submitAiFeedback(payload: AiFeedbackRequest): Promise<void> {
+  const res = await fetch(`${API_BASE}/api/ai/feedback`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  })
+  if (!res.ok) await throwApiError(res, "AI 反馈提交失败")
 }
