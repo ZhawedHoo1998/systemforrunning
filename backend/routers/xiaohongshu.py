@@ -32,6 +32,7 @@ SOURCE_DOMAINS = ("xiaohongshu.com", "xhslink.com")
 IMAGE_DOMAINS = ("xiaohongshu.com", "xhscdn.com")
 MAX_IMAGES = 24
 MAX_IMAGE_SIZE = 25 * 1024 * 1024
+MAX_VIDEO_SIZE = 200 * 1024 * 1024
 HTTP_HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -122,11 +123,13 @@ def _parse_cli_json(stdout: str) -> dict[str, Any]:
 def _friendly_cli_error(message: str) -> str:
     normalized = message.lower()
     if any(keyword in normalized for keyword in ("login", "cookie", "登录", "未登录", "unauthorized")):
-        return "小红书登录状态无效，请在后端运行 xhs login --qrcode 后重试"
+        return "小红书登录状态无效，请在后端重新运行 xhs login --cookie-source firefox（或换成实际登录的浏览器）"
     if any(keyword in normalized for keyword in ("captcha", "risk", "verify", "验证", "风控")):
         return "小红书触发了安全验证，请稍后重试或重新登录"
     if "not found" in normalized or "不存在" in normalized:
         return "没有找到这篇小红书笔记，可能已删除或不可见"
+    if "api error" in normalized:
+        return "小红书接口暂时拒绝了请求，请稍后重试；若持续失败，请升级 xiaohongshu-cli 并重新登录"
     return f"小红书内容获取失败：{message or '未知错误'}"
 
 
@@ -231,6 +234,79 @@ def _image_url(image: Any) -> str | None:
     return None
 
 
+def _video_info(note: dict[str, Any]) -> dict[str, Any]:
+    video = note.get("video")
+    if not isinstance(video, dict):
+        return {"url": None, "duration_seconds": 0}
+
+    media = video.get("media")
+    if not isinstance(media, dict):
+        media_v2 = video.get("media_v2")
+        if isinstance(media_v2, str):
+            try:
+                parsed_media = json.loads(media_v2)
+            except json.JSONDecodeError:
+                parsed_media = None
+            media = parsed_media if isinstance(parsed_media, dict) else {}
+        else:
+            media = {}
+
+    stream = media.get("stream") if isinstance(media.get("stream"), dict) else {}
+    selected_stream: dict[str, Any] | None = None
+    for codec in ("h264", "h265"):
+        candidates = stream.get(codec)
+        if not isinstance(candidates, list):
+            continue
+        compatible = [
+            candidate
+            for candidate in candidates
+            if isinstance(candidate, dict)
+            and _number(candidate.get("size")) <= MAX_VIDEO_SIZE
+            and (_normalize_url(candidate.get("master_url")) or candidate.get("backup_urls"))
+        ]
+        if not compatible:
+            continue
+        preferred = [candidate for candidate in compatible if _number(candidate.get("height")) <= 1080]
+        selected_stream = max(
+            preferred or compatible,
+            key=lambda candidate: _number(candidate.get("width")) * _number(candidate.get("height")),
+        )
+        break
+
+    if not selected_stream:
+        return {"url": None, "duration_seconds": 0}
+
+    video_url = _normalize_url(selected_stream.get("master_url"))
+    if not video_url:
+        backup_urls = selected_stream.get("backup_urls")
+        if isinstance(backup_urls, list):
+            video_url = next(
+                (_normalize_url(candidate) for candidate in backup_urls if _normalize_url(candidate)),
+                None,
+            )
+
+    capa = video.get("capa") if isinstance(video.get("capa"), dict) else {}
+    media_video = media.get("video") if isinstance(media.get("video"), dict) else {}
+    duration_seconds = _number(capa.get("duration") or media_video.get("duration"))
+    if not duration_seconds:
+        duration_ms = _number(selected_stream.get("duration"))
+        duration_seconds = round(duration_ms / 1000) if duration_ms else 0
+
+    return {"url": video_url, "duration_seconds": duration_seconds}
+
+
+def _fallback_title(content: str, author: str, note_type: str) -> str:
+    first_line = next(
+        (line.strip() for line in content.splitlines() if line.strip() and not line.lstrip().startswith("#")),
+        "",
+    )
+    if first_line:
+        return first_line if len(first_line) <= 36 else f"{first_line[:36]}..."
+    if note_type == "video":
+        return f"{author or '小红书博主'}的视频笔记"
+    return "小红书笔记"
+
+
 def normalize_note(data: dict[str, Any]) -> dict[str, Any]:
     items = data.get("items")
     if not isinstance(items, list) or not items or not isinstance(items[0], dict):
@@ -258,16 +334,24 @@ def normalize_note(data: dict[str, Any]) -> dict[str, Any]:
         if url and url not in image_urls:
             image_urls.append(url)
 
-    title = str(note.get("title") or note.get("display_title") or "小红书笔记").strip()
     content = str(note.get("desc") or "").strip()
+    author = str(user.get("nickname") or "").strip()
+    note_type = str(note.get("type") or "normal").strip()
+    title = str(note.get("title") or note.get("display_title") or "").strip()
+    if not title:
+        title = _fallback_title(content, author, note_type)
+    video_info = _video_info(note)
     return {
         "note_id": str(item.get("id") or note.get("note_id") or ""),
         "title": title,
         "content": content,
-        "author": str(user.get("nickname") or "").strip(),
+        "author": author,
         "author_id": str(user.get("user_id") or "").strip(),
         "tags": tags,
         "image_urls": image_urls,
+        "note_type": note_type,
+        "video_url": video_info["url"],
+        "video_duration_seconds": video_info["duration_seconds"],
         "metrics": {
             "likes": _number(interact.get("liked_count")),
             "collections": _number(interact.get("collected_count")),
@@ -391,6 +475,52 @@ async def download_images(image_urls: list[str]) -> tuple[list[dict[str, Any]], 
     return attachments, warnings
 
 
+async def download_video(video_url: str | None) -> tuple[dict[str, Any] | None, str | None]:
+    if not video_url:
+        return None, None
+
+    parsed = urlparse(video_url)
+    if not _host_allowed(parsed.hostname, IMAGE_DOMAINS):
+        return None, "视频来源域名不受支持"
+
+    filename = f"xhs-{uuid.uuid4().hex}.mp4"
+    filepath = UPLOAD_DIR / filename
+    try:
+        async with httpx.AsyncClient(
+            follow_redirects=True,
+            max_redirects=5,
+            timeout=httpx.Timeout(90.0),
+            headers=HTTP_HEADERS,
+        ) as client:
+            async with client.stream("GET", video_url) as response:
+                response.raise_for_status()
+                if not _host_allowed(response.url.host, IMAGE_DOMAINS):
+                    return None, "视频跳转到了非小红书域名"
+
+                content_length = _number(response.headers.get("content-length"))
+                if content_length > MAX_VIDEO_SIZE:
+                    return None, "视频超过 200MB，未自动下载"
+
+                total_size = 0
+                async with aiofiles.open(filepath, "wb") as output:
+                    async for chunk in response.aiter_bytes(1024 * 512):
+                        total_size += len(chunk)
+                        if total_size > MAX_VIDEO_SIZE:
+                            raise ValueError("视频超过 200MB")
+                        await output.write(chunk)
+
+        return ({
+            "name": "小红书视频-1.mp4",
+            "path": f"/uploads/{filename}",
+            "type": "video/mp4",
+            "size": total_size,
+        }, None)
+    except (httpx.HTTPError, OSError, ValueError) as error:
+        if filepath.exists():
+            filepath.unlink()
+        return None, f"视频下载失败：{error}"
+
+
 @router.get("/status")
 async def get_import_status():
     try:
@@ -399,12 +529,12 @@ async def get_import_status():
         return {
             "installed": False,
             "cli_path": None,
-            "setup_hint": "pip install xiaohongshu-cli",
+            "setup_hint": "python -m pip install --upgrade 'xiaohongshu-cli>=0.6.4,<0.7.0'",
         }
     return {
         "installed": True,
         "cli_path": cli_path,
-        "setup_hint": "首次使用或登录失效时，在后端运行 xhs login --qrcode",
+        "setup_hint": "登录失效时运行 xhs login --cookie-source firefox（或换成实际登录的浏览器）",
     }
 
 
@@ -432,7 +562,7 @@ async def import_xiaohongshu_material(request: XiaohongshuImportRequest):
             continue
         tried_targets.add(comment_target)
         try:
-            comments_data = await run_xhs_command("comments", comment_target, timeout_seconds=120)
+            comments_data = await run_xhs_command("comments", comment_target, timeout_seconds=45)
             top_comments = normalize_comments(comments_data)
             if top_comments:
                 break
@@ -440,10 +570,19 @@ async def import_xiaohongshu_material(request: XiaohongshuImportRequest):
             comment_error = str(error.detail)
 
     if not top_comments:
-        warnings.append(comment_error or "这篇笔记暂未获取到公开评论，或小红书暂时限制了评论接口")
+        warnings.append(
+            f"热门评论暂未获取：{comment_error}"
+            if comment_error
+            else "这篇笔记暂未获取到公开评论，或小红书暂时限制了评论接口"
+        )
 
     attachments, image_warnings = await download_images(normalized_note["image_urls"])
     warnings.extend(image_warnings)
+    video_attachment, video_warning = await download_video(normalized_note["video_url"])
+    if video_attachment:
+        attachments.append(video_attachment)
+    if video_warning:
+        warnings.append(video_warning)
 
     content = normalized_note["content"]
     summary = content[:180] + ("..." if len(content) > 180 else "")
@@ -456,6 +595,9 @@ async def import_xiaohongshu_material(request: XiaohongshuImportRequest):
         "metrics": normalized_note["metrics"],
         "top_comments": top_comments,
         "image_count": len(normalized_note["image_urls"]),
+        "video_count": 1 if video_attachment else 0,
+        "note_type": normalized_note["note_type"],
+        "video_duration_seconds": normalized_note["video_duration_seconds"],
         "imported_at": datetime.now(timezone.utc).isoformat(),
     }
 

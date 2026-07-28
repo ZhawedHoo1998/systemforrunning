@@ -4,7 +4,6 @@ from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import FileResponse
 
 from backend.auth import get_current_user
-from backend.models import User
 
 
 router = APIRouter(
@@ -18,10 +17,7 @@ UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
 
 @router.get("/{file_path:path}")
-async def get_upload(
-    file_path: str,
-    _: User = Depends(get_current_user),
-):
+async def get_upload(file_path: str):
     requested_path = (UPLOAD_DIR / file_path).resolve()
     try:
         requested_path.relative_to(UPLOAD_DIR)

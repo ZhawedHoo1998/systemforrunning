@@ -8,4 +8,4 @@ alembic==1.13.3
 openai>=1.68.0
 python-dotenv>=1.0.1
 httpx>=0.27.2
-xiaohongshu-cli>=0.4.0
+xiaohongshu-cli>=0.6.4,<0.7.0

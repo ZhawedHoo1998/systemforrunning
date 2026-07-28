@@ -3,6 +3,7 @@ import json
 import logging
 import os
 import uuid
+from datetime import datetime
 from typing import Literal, Optional
 
 import aiofiles
@@ -85,6 +86,79 @@ class FeedbackRequest(BaseModel):
     material_ids: list[str] = Field(default_factory=list, max_length=12)
     brand: Optional[str] = Field(default=None, max_length=200)
     car_model: Optional[str] = Field(default=None, max_length=200)
+
+
+WRITING_PLAN_SCHEMA = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": [
+        "understanding",
+        "factual_questions",
+        "titles",
+        "directions",
+        "recommendation",
+    ],
+    "properties": {
+        "understanding": {"type": "string"},
+        "factual_questions": {
+            "type": "array",
+            "items": {"type": "string"},
+            "maxItems": 4,
+        },
+        "titles": {
+            "type": "array",
+            "minItems": 6,
+            "maxItems": 12,
+            "items": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": ["category", "text", "rationale"],
+                "properties": {
+                    "category": {"type": "string"},
+                    "text": {"type": "string"},
+                    "rationale": {"type": "string"},
+                },
+            },
+        },
+        "directions": {
+            "type": "array",
+            "minItems": 3,
+            "maxItems": 5,
+            "items": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": ["name", "summary", "tone", "opening", "outline"],
+                "properties": {
+                    "name": {"type": "string"},
+                    "summary": {"type": "string"},
+                    "tone": {"type": "string"},
+                    "opening": {"type": "string"},
+                    "outline": {
+                        "type": "array",
+                        "minItems": 3,
+                        "maxItems": 6,
+                        "items": {"type": "string"},
+                    },
+                },
+            },
+        },
+        "recommendation": {
+            "type": "object",
+            "additionalProperties": False,
+            "required": ["title_index", "direction_indexes", "reason"],
+            "properties": {
+                "title_index": {"type": "integer"},
+                "direction_indexes": {
+                    "type": "array",
+                    "minItems": 1,
+                    "maxItems": 2,
+                    "items": {"type": "integer"},
+                },
+                "reason": {"type": "string"},
+            },
+        },
+    },
+}
 
 
 def read_bounded_int(name: str, default: int, minimum: int, maximum: int):
@@ -194,6 +268,84 @@ def build_instructions(task: str, brand: Optional[str], car_model: Optional[str]
     if context:
         parts.append("以下是写手主动选择的内部参考素材：\n" + context)
     return "\n\n".join(parts)
+
+
+def parse_json_output(output_text: str):
+    cleaned = output_text.strip()
+    if cleaned.startswith("```"):
+        cleaned = cleaned.removeprefix("```json").removeprefix("```")
+        cleaned = cleaned.removesuffix("```").strip()
+    start = cleaned.find("{")
+    end = cleaned.rfind("}")
+    if start < 0 or end < start:
+        raise ValueError("AI did not return a JSON object")
+    return json.loads(cleaned[start:end + 1])
+
+
+def normalize_writing_plan(payload: dict):
+    titles = []
+    for index, item in enumerate(payload.get("titles", [])[:12]):
+        if not isinstance(item, dict) or not str(item.get("text", "")).strip():
+            continue
+        titles.append({
+            "id": f"title-{uuid.uuid4().hex}",
+            "category": str(item.get("category", "标题方案")).strip()[:40],
+            "text": str(item["text"]).strip()[:200],
+            "rationale": str(item.get("rationale", "")).strip()[:500],
+        })
+
+    directions = []
+    for item in payload.get("directions", [])[:5]:
+        if not isinstance(item, dict) or not str(item.get("name", "")).strip():
+            continue
+        outline = [
+            str(step).strip()[:500]
+            for step in item.get("outline", [])[:6]
+            if str(step).strip()
+        ]
+        directions.append({
+            "id": f"direction-{uuid.uuid4().hex}",
+            "name": str(item["name"]).strip()[:100],
+            "summary": str(item.get("summary", "")).strip()[:1000],
+            "tone": str(item.get("tone", "")).strip()[:300],
+            "opening": str(item.get("opening", "")).strip()[:1000],
+            "outline": outline,
+        })
+
+    if not titles or not directions:
+        raise ValueError("AI writing plan is incomplete")
+
+    recommendation = payload.get("recommendation", {})
+    title_index = recommendation.get("title_index", 0)
+    if not isinstance(title_index, int) or title_index < 0 or title_index >= len(titles):
+        title_index = 0
+    direction_indexes = recommendation.get("direction_indexes", [0])
+    selected_direction_ids = []
+    for index in direction_indexes:
+        if isinstance(index, int) and 0 <= index < len(directions):
+            direction_id = directions[index]["id"]
+            if direction_id not in selected_direction_ids:
+                selected_direction_ids.append(direction_id)
+    if not selected_direction_ids:
+        selected_direction_ids = [directions[0]["id"]]
+
+    return {
+        "id": f"plan-{uuid.uuid4().hex}",
+        "understanding": str(payload.get("understanding", "")).strip()[:3000],
+        "factual_questions": [
+            str(item).strip()[:500]
+            for item in payload.get("factual_questions", [])[:4]
+            if str(item).strip()
+        ],
+        "titles": titles,
+        "directions": directions,
+        "recommended_title_id": titles[title_index]["id"],
+        "recommended_direction_ids": selected_direction_ids,
+        "recommendation_reason": str(recommendation.get("reason", "")).strip()[:1000],
+        "selected_title_id": titles[title_index]["id"],
+        "selected_direction_ids": selected_direction_ids,
+        "created_at": datetime.utcnow().isoformat(),
+    }
 
 
 @router.get("/status")
@@ -315,6 +467,64 @@ async def chat(request: ChatRequest, db: Session = Depends(get_db)):
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
+
+
+@router.post("/writing-plan")
+async def create_writing_plan(request: ChatRequest, db: Session = Depends(get_db)):
+    settings = get_settings()
+    if not settings["text_model"]:
+        raise HTTPException(status_code=503, detail="后台尚未配置 OPENAI_TEXT_MODEL")
+    client = get_client(settings["api_key"], settings["base_url"])
+    materials = load_materials(db, request.material_ids)
+    instructions = build_instructions(
+        "concept",
+        request.brand,
+        request.car_model,
+        build_material_context(materials),
+    ) + """
+
+你现在只负责整理可供写手选择的创作方案。标题之间必须有实质差异，内容方向需要具体到开头、语气和结构。
+不要直接写完整正文，不要编造素材中没有的产品参数、用户反馈或活动规则。"""
+
+    try:
+        try:
+            response = await client.responses.create(
+                model=settings["text_model"],
+                instructions=instructions,
+                input=[message.model_dump() for message in request.messages],
+                max_output_tokens=min(settings["max_output_tokens"], 7000),
+                text={
+                    "format": {
+                        "type": "json_schema",
+                        "name": "xiaohongshu_writing_plan",
+                        "schema": WRITING_PLAN_SCHEMA,
+                        "strict": True,
+                    }
+                },
+                store=False,
+            )
+        except OpenAIError:
+            logger.warning("Structured output unsupported; retrying writing plan as JSON")
+            response = await client.responses.create(
+                model=settings["text_model"],
+                instructions=(
+                    instructions
+                    + "\n\n只输出一个 JSON 对象，不要使用 Markdown 代码块。必须严格符合以下 JSON Schema：\n"
+                    + json.dumps(WRITING_PLAN_SCHEMA, ensure_ascii=False)
+                ),
+                input=[message.model_dump() for message in request.messages],
+                max_output_tokens=min(settings["max_output_tokens"], 7000),
+                store=False,
+            )
+        return normalize_writing_plan(parse_json_output(response.output_text))
+    except (OpenAIError, ValueError, TypeError, json.JSONDecodeError) as error:
+        logger.exception("OpenAI writing plan request failed")
+        raise HTTPException(
+            status_code=502,
+            detail="AI 创作方案整理失败，请重试或检查文本模型配置",
+        ) from error
+    finally:
+        await client.close()
 
 
 async def read_reference_upload(reference_image: UploadFile):

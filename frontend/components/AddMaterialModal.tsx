@@ -320,7 +320,7 @@ export function AddMaterialModal({
                     <div className="min-w-0 flex-1">
                       <h4 className="text-sm font-semibold">自动导入小红书内容</h4>
                       <p className="mt-1 text-xs leading-5 text-muted-foreground">
-                        粘贴分享链接或完整分享文案，系统会获取标题、正文、图片和按点赞数排序的前 10 条评论。
+                        粘贴分享链接或完整分享文案，系统会获取标题、正文、图片、视频和按点赞数排序的前 10 条评论。
                       </p>
                     </div>
                   </div>
@@ -446,6 +446,9 @@ export function AddMaterialModal({
                     </div>
                     <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-xs text-muted-foreground">
                       <span>{sourceMetadata.image_count ?? existingAttachments.filter(isImageAttachment).length} 张图片</span>
+                      {(sourceMetadata.video_count ?? existingAttachments.filter(isVideoAttachment).length) > 0 && (
+                        <span>{sourceMetadata.video_count ?? existingAttachments.filter(isVideoAttachment).length} 个视频</span>
+                      )}
                       <span>{sourceMetadata.top_comments?.length ?? 0} 条热门评论</span>
                       <span>可继续编辑后保存</span>
                     </div>

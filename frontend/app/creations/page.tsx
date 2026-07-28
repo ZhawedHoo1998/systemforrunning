@@ -153,9 +153,18 @@ export default function CreationsPage() {
         ) : (
           <div className="grid gap-4 pt-5 md:grid-cols-2 xl:grid-cols-3">
             {creations.map((creation) => {
-              const images = creation.attachments.filter(isImageAttachment)
+              const finalDraft = creation.ai_conversation.draft
+              const selectedAssetPaths = new Set(finalDraft?.selected_asset_paths || [])
+              const allImages = creation.attachments.filter(isImageAttachment)
+              const selectedImages = allImages.filter((image) => selectedAssetPaths.has(image.path))
+              const images = selectedImages.length > 0 ? selectedImages : allImages
               const previewImages = images.slice(0, 3)
               const taskLabel = TASK_LABELS[creation.ai_conversation.task]
+              const displayTitle = finalDraft?.title || creation.title
+              const displayContent = finalDraft?.content || creation.summary || creation.original_content || "暂无文字内容"
+              const imageRecordCount = creation.ai_conversation.image_threads
+                ? creation.ai_conversation.image_threads.reduce((total, thread) => total + thread.messages.length, 0)
+                : creation.ai_conversation.image_messages?.length || 0
               return (
                 <article key={creation.id} className="flex min-h-[320px] flex-col overflow-hidden rounded-lg border bg-card">
                   {previewImages.length > 0 && (
@@ -170,7 +179,7 @@ export default function CreationsPage() {
                           className="group relative min-w-0 overflow-hidden bg-muted outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"
                           onClick={() => setPreviewImage({
                             src: image.path,
-                            alt: image.name || `${creation.title} 配图 ${index + 1}`,
+                            alt: image.name || `${displayTitle} 配图 ${index + 1}`,
                             name: image.name,
                           })}
                           aria-label={`放大${image.name || `配图 ${index + 1}`}`}
@@ -189,6 +198,7 @@ export default function CreationsPage() {
                     <div className="mb-3 flex items-start justify-between gap-3">
                       <div className="flex flex-wrap gap-1.5">
                         <Badge variant="secondary">{taskLabel}</Badge>
+                        {finalDraft?.content && <Badge variant="outline">已成稿</Badge>}
                         {creation.ai_conversation.brand && creation.ai_conversation.car_model && (
                           <Badge variant="outline">
                             {creation.ai_conversation.brand} · {creation.ai_conversation.car_model}
@@ -208,12 +218,12 @@ export default function CreationsPage() {
                         {deletingId === creation.id ? <LoaderCircle className="animate-spin" /> : <Trash2 />}
                       </Button>
                     </div>
-                    <h2 className="line-clamp-2 text-base font-semibold leading-6">{creation.title}</h2>
+                    <h2 className="line-clamp-2 text-base font-semibold leading-6">{displayTitle}</h2>
                     <p className="mt-2 line-clamp-4 whitespace-pre-wrap text-sm leading-6 text-muted-foreground">
-                      {creation.summary || creation.original_content || "暂无文字内容"}
+                      {displayContent}
                     </p>
                     <div className="mt-auto flex items-center justify-between gap-3 border-t pt-3 text-xs text-muted-foreground">
-                      <span>{creation.ai_conversation.messages.length} 条文案对话 · {creation.ai_conversation.image_messages?.length || 0} 条图片记录</span>
+                      <span>{creation.ai_conversation.messages.length} 条文案对话 · {imageRecordCount} 条图片记录</span>
                       <time dateTime={creation.updated_at}>{formatCreationDate(creation.updated_at)}</time>
                     </div>
                     <Button asChild className="mt-3 w-full">

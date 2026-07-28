@@ -150,6 +150,9 @@ export interface MaterialSourceMetadata {
   share_text?: string
   resolved_url?: string
   image_count?: number
+  video_count?: number
+  note_type?: string
+  video_duration_seconds?: number
   imported_at?: string
   metrics?: {
     likes?: number
@@ -257,8 +260,58 @@ export interface AiImageThread {
   updated_at: string
 }
 
+export interface AiTitleCandidate {
+  id: string
+  category: string
+  text: string
+  rationale: string
+}
+
+export interface AiContentDirection {
+  id: string
+  name: string
+  summary: string
+  tone: string
+  opening: string
+  outline: string[]
+}
+
+export interface AiWritingPlan {
+  id: string
+  understanding: string
+  factual_questions: string[]
+  titles: AiTitleCandidate[]
+  directions: AiContentDirection[]
+  recommended_title_id: string
+  recommended_direction_ids: string[]
+  recommendation_reason: string
+  selected_title_id: string | null
+  selected_direction_ids: string[]
+  created_at: string
+}
+
+export interface AiDraftVersion {
+  id: string
+  title: string
+  content: string
+  source: string
+  created_at: string
+}
+
+export interface AiDraft {
+  title: string
+  content: string
+  selected_plan_id: string | null
+  selected_title_id: string | null
+  selected_direction_ids: string[]
+  selected_asset_paths: string[]
+  cover_asset_path: string | null
+  versions: AiDraftVersion[]
+  updated_at: string | null
+}
+
 export interface AiConversation {
-  version: 1 | 2
+  version: 1 | 2 | 3
   task: AiTask
   messages: AiMessage[]
   selected_material_ids: string[]
@@ -274,6 +327,9 @@ export interface AiConversation {
   image_threads?: AiImageThread[]
   active_image_thread_id?: string | null
   uploaded_reference_images?: Attachment[]
+  writing_plans?: AiWritingPlan[]
+  active_writing_plan_id?: string | null
+  draft?: AiDraft
   prompt_version: string | null
   saved_at: string
 }
@@ -409,6 +465,17 @@ export async function deleteCreation(id: string): Promise<void> {
   if (!res.ok) await throwApiError(res, "删除创作失败")
 }
 
+export async function exportCreationPackage(id: string): Promise<{ blob: Blob; filename: string }> {
+  const res = await apiFetch(`${API_BASE}/api/creations/${id}/export`, { method: "POST" })
+  if (!res.ok) await throwApiError(res, "发布包导出失败")
+  const disposition = res.headers.get("Content-Disposition") || ""
+  const encodedFilename = disposition.match(/filename\*=UTF-8''([^;]+)/i)?.[1]
+  return {
+    blob: await res.blob(),
+    filename: encodedFilename ? decodeURIComponent(encodedFilename) : "小红书笔记-发布包.zip",
+  }
+}
+
 export async function createMaterial(formData: FormData): Promise<Material> {
   const res = await apiFetch(`${API_BASE}/api/materials`, {
     method: "POST",
@@ -525,6 +592,16 @@ export async function streamAiChat(
       if (data.type === "error") throw new Error(data.message || "AI 对话请求失败")
     }
   }
+}
+
+export async function generateAiWritingPlan(payload: AiChatRequest): Promise<AiWritingPlan> {
+  const res = await apiFetch(`${API_BASE}/api/ai/writing-plan`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  })
+  if (!res.ok) await throwApiError(res, "AI 创作方案整理失败")
+  return res.json()
 }
 
 export async function generateAiImage(payload: AiImageRequest): Promise<AiImageResult> {

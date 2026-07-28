@@ -6,10 +6,13 @@ import {
   AlertCircle,
   CheckCircle2,
   Clapperboard,
+  FilePenLine,
   FileText,
   History,
+  ListChecks,
   LoaderCircle,
   Maximize2,
+  MessageSquareText,
   RefreshCw,
   Save,
   Search,
@@ -23,6 +26,7 @@ import {
 } from "lucide-react"
 import { AiImageWorkspace } from "@/components/AiImageWorkspace"
 import { AiMarkdown } from "@/components/AiMarkdown"
+import { AiDraftWorkspace, AiPlanWorkspace } from "@/components/AiWritingWorkspace"
 import { Header } from "@/components/Header"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
@@ -44,7 +48,9 @@ import {
 } from "@/components/ui/dialog"
 import {
   createCreation,
+  exportCreationPackage,
   generateAiImage,
+  generateAiWritingPlan,
   getAiStatus,
   getCreation,
   getMaterial,
@@ -58,8 +64,11 @@ import {
   type AiMessage,
   type AiImageMessage,
   type AiImageThread,
+  type AiDraft,
+  type AiDraftVersion,
   type AiStatus,
   type AiTask,
+  type AiWritingPlan,
   type Attachment,
   type Material,
   type MaterialScope,
@@ -83,6 +92,31 @@ const MATERIAL_FILTERS: { value: "all" | MaterialScope; label: string }[] = [
 ]
 
 const MAX_IMAGE_REFERENCES = 8
+type WritingWorkspaceMode = "chat" | "plan" | "draft"
+
+function createEmptyDraft(): AiDraft {
+  return {
+    title: "",
+    content: "",
+    selected_plan_id: null,
+    selected_title_id: null,
+    selected_direction_ids: [],
+    selected_asset_paths: [],
+    cover_asset_path: null,
+    versions: [],
+    updated_at: null,
+  }
+}
+
+function createDraftVersion(draft: AiDraft, source: string): AiDraftVersion {
+  return {
+    id: `draft-version-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+    title: draft.title,
+    content: draft.content,
+    source,
+    created_at: new Date().toISOString(),
+  }
+}
 
 function createImageThread(index: number, id = `image-thread-${Date.now()}-${index}`): AiImageThread {
   const now = new Date().toISOString()
@@ -139,6 +173,13 @@ export default function AiStudioPage() {
   const [uploadedReferenceImages, setUploadedReferenceImages] = useState<Attachment[]>([])
   const [generatingImageThreadId, setGeneratingImageThreadId] = useState<string | null>(null)
   const [uploadingReferences, setUploadingReferences] = useState(false)
+  const [writingPlans, setWritingPlans] = useState<AiWritingPlan[]>([])
+  const [activeWritingPlanId, setActiveWritingPlanId] = useState<string | null>(null)
+  const [draft, setDraft] = useState<AiDraft>(() => createEmptyDraft())
+  const [writingWorkspaceMode, setWritingWorkspaceMode] = useState<WritingWorkspaceMode>("chat")
+  const [generatingDraft, setGeneratingDraft] = useState(false)
+  const [exportingPackage, setExportingPackage] = useState(false)
+  const [copyNotice, setCopyNotice] = useState("")
   const [noteTitle, setNoteTitle] = useState("")
   const [saving, setSaving] = useState(false)
   const [savedCreation, setSavedCreation] = useState<Creation | null>(null)
@@ -231,7 +272,17 @@ export default function AiStudioPage() {
         setImageThreads(restoredThreads)
         setActiveImageThreadId(restoredActiveThreadId)
         setUploadedReferenceImages(conversation.uploaded_reference_images || [])
-        setNoteTitle(creation.title)
+        const restoredPlans = conversation.writing_plans || []
+        const restoredDraft = conversation.draft || createEmptyDraft()
+        setWritingPlans(restoredPlans)
+        setActiveWritingPlanId(
+          restoredPlans.some((plan) => plan.id === conversation.active_writing_plan_id)
+            ? conversation.active_writing_plan_id!
+            : restoredPlans[0]?.id ?? null
+        )
+        setDraft(restoredDraft)
+        setWritingWorkspaceMode(restoredDraft.content ? "draft" : restoredPlans.length > 0 ? "plan" : "chat")
+        setNoteTitle(restoredDraft.title || creation.title)
         setSavedCreation(null)
       })
       .catch((error) => {
@@ -313,6 +364,11 @@ export default function AiStudioPage() {
   const generatedImageSources = useMemo(() => imageThreads.flatMap((thread) =>
     thread.generated_images.map((attachment) => ({ attachment, label: thread.title }))
   ), [imageThreads])
+  const exportableDraftImages = useMemo(() => Array.from(new Map(
+    [...generatedImages, ...uploadedReferenceImages]
+      .filter(isImageAttachment)
+      .map((attachment) => [attachment.path, attachment])
+  ).values()), [generatedImages, uploadedReferenceImages])
   const uploadedReferenceSources = useMemo(() => uploadedReferenceImages.map((attachment) => ({
     attachment,
     label: "本次上传",
@@ -336,6 +392,10 @@ export default function AiStudioPage() {
     () => messages.slice().reverse().find((message) => message.role === "assistant" && message.content)?.content ?? "",
     [messages]
   )
+  const activeWritingPlan = useMemo(
+    () => writingPlans.find((plan) => plan.id === activeWritingPlanId) ?? writingPlans[0] ?? null,
+    [activeWritingPlanId, writingPlans]
+  )
   const firstUserIdea = useMemo(
     () => messages.find((message) => message.role === "user")?.content ?? input.trim(),
     [messages, input]
@@ -344,7 +404,7 @@ export default function AiStudioPage() {
   const chatReady = Boolean(status?.chat_configured)
   const imageReady = Boolean(status?.image_configured)
   const hasImageResults = generatedImages.length > 0
-  const canSaveIdea = Boolean(latestAssistant || hasImageResults)
+  const canSaveIdea = Boolean(latestAssistant || hasImageResults || draft.title.trim() || draft.content.trim())
 
   const toggleMaterial = (material: Material) => {
     setSelectedMaterials((current) =>
@@ -460,9 +520,126 @@ export default function AiStudioPage() {
     let fullResponse = ""
 
     try {
+      const request = {
+        task,
+        brand: selectedBrand,
+        car_model: selectedCarModel,
+        material_ids: selectedMaterialIds,
+        messages: nextMessages,
+      }
+      if (task === "concept" || task === "title") {
+        const plan = await generateAiWritingPlan(request)
+        fullResponse = `已整理 ${plan.titles.length} 个标题和 ${plan.directions.length} 个内容方向，请在“方案选择”中确定后继续写作。`
+        setWritingPlans((current) => [...current, plan])
+        setActiveWritingPlanId(plan.id)
+        setWritingWorkspaceMode("plan")
+        const recommendedTitle = plan.titles.find((title) => title.id === plan.recommended_title_id)
+        if (recommendedTitle && !noteTitle) setNoteTitle(recommendedTitle.text)
+        setMessages((current) => current.map((message, index) =>
+          index === assistantIndex
+            ? { role: "assistant", content: fullResponse }
+            : message
+        ))
+      } else {
+        await streamAiChat(
+          request,
+          (delta) => {
+            fullResponse += delta
+            setMessages((current) => current.map((message, index) =>
+              index === assistantIndex
+                ? { role: "assistant", content: fullResponse }
+                : message
+            ))
+          }
+        )
+      }
+      if (fullResponse && !noteTitle && task !== "concept" && task !== "title") {
+        setNoteTitle(deriveTitle(fullResponse, selectedCarModel))
+      }
+    } catch (error) {
+      setMessages((current) => current.filter((_, index) => index !== assistantIndex))
+      setChatError(error instanceof Error ? error.message : "AI 对话请求失败")
+    } finally {
+      setStreaming(false)
+    }
+  }
+
+  const handleSelectWritingPlan = (planId: string) => {
+    setActiveWritingPlanId(planId)
+    setWritingWorkspaceMode("plan")
+  }
+
+  const handleSelectPlanTitle = (titleId: string) => {
+    if (!activeWritingPlan) return
+    setWritingPlans((current) => current.map((plan) =>
+      plan.id === activeWritingPlan.id ? { ...plan, selected_title_id: titleId } : plan
+    ))
+  }
+
+  const handleTogglePlanDirection = (directionId: string) => {
+    if (!activeWritingPlan) return
+    setWritingPlans((current) => current.map((plan) => {
+      if (plan.id !== activeWritingPlan.id) return plan
+      const selected = plan.selected_direction_ids.includes(directionId)
+      if (!selected && plan.selected_direction_ids.length >= 2) return plan
+      return {
+        ...plan,
+        selected_direction_ids: selected
+          ? plan.selected_direction_ids.filter((id) => id !== directionId)
+          : [...plan.selected_direction_ids, directionId],
+      }
+    }))
+  }
+
+  const handleDevelopDraft = async () => {
+    if (!activeWritingPlan || !activeWritingPlan.selected_title_id || generatingDraft || streaming) return
+    const selectedTitle = activeWritingPlan.titles.find(
+      (title) => title.id === activeWritingPlan.selected_title_id
+    )
+    const selectedDirections = activeWritingPlan.directions.filter((direction) =>
+      activeWritingPlan.selected_direction_ids.includes(direction.id)
+    )
+    if (!selectedTitle || selectedDirections.length === 0) return
+
+    const previousDraft = draft
+    const userContent = [
+      `采用标题：${selectedTitle.text}`,
+      `采用内容方向：${selectedDirections.map((direction) => direction.name).join("、")}`,
+      "请根据已选素材和前面的想法写出一篇完整的小红书正文。不要重复输出标题，不要写创作说明，不得编造素材中没有的事实。",
+      ...selectedDirections.map((direction) => [
+        `方向“${direction.name}”：${direction.summary}`,
+        `建议开头：${direction.opening}`,
+        `结构：${direction.outline.join(" → ")}`,
+      ].join("\n")),
+    ].join("\n\n")
+    const nextMessages: AiMessage[] = [...messages, { role: "user", content: userContent }]
+    const assistantIndex = nextMessages.length
+    setMessages([...nextMessages, { role: "assistant", content: "" }])
+    setTask("note")
+    setWritingWorkspaceMode("draft")
+    setGeneratingDraft(true)
+    setStreaming(true)
+    setChatError("")
+    setSavedCreation(null)
+    setNoteTitle(selectedTitle.text)
+    setDraft({
+      ...previousDraft,
+      title: selectedTitle.text,
+      content: "",
+      selected_plan_id: activeWritingPlan.id,
+      selected_title_id: selectedTitle.id,
+      selected_direction_ids: activeWritingPlan.selected_direction_ids,
+      versions: previousDraft.content.trim()
+        ? [...previousDraft.versions, createDraftVersion(previousDraft, "生成新稿前")]
+        : previousDraft.versions,
+      updated_at: new Date().toISOString(),
+    })
+    let fullResponse = ""
+
+    try {
       await streamAiChat(
         {
-          task,
+          task: "note",
           brand: selectedBrand,
           car_model: selectedCarModel,
           material_ids: selectedMaterialIds,
@@ -471,18 +648,116 @@ export default function AiStudioPage() {
         (delta) => {
           fullResponse += delta
           setMessages((current) => current.map((message, index) =>
-            index === assistantIndex
-              ? { role: "assistant", content: fullResponse }
-              : message
+            index === assistantIndex ? { role: "assistant", content: fullResponse } : message
           ))
+          setDraft((current) => ({
+            ...current,
+            content: fullResponse,
+            updated_at: new Date().toISOString(),
+          }))
         }
       )
-      if (fullResponse && !noteTitle) setNoteTitle(deriveTitle(fullResponse, selectedCarModel))
+      setDraft((current) => ({
+        ...current,
+        versions: fullResponse.trim()
+          ? [...current.versions, createDraftVersion({ ...current, content: fullResponse }, "AI 初稿")]
+          : current.versions,
+        updated_at: new Date().toISOString(),
+      }))
     } catch (error) {
       setMessages((current) => current.filter((_, index) => index !== assistantIndex))
-      setChatError(error instanceof Error ? error.message : "AI 对话请求失败")
+      setDraft(previousDraft)
+      setChatError(error instanceof Error ? error.message : "AI 正文生成失败")
     } finally {
+      setGeneratingDraft(false)
       setStreaming(false)
+    }
+  }
+
+  const updateDraftField = (field: "title" | "content", value: string) => {
+    setDraft((current) => ({
+      ...current,
+      [field]: value,
+      updated_at: new Date().toISOString(),
+    }))
+    if (field === "title") setNoteTitle(value)
+    setSavedCreation(null)
+  }
+
+  const handleApplyAssistant = () => {
+    if (!latestAssistant.trim() || latestAssistant.trim() === draft.content.trim()) return
+    setDraft((current) => ({
+      ...current,
+      content: latestAssistant,
+      versions: current.content.trim()
+        ? [...current.versions, createDraftVersion(current, "采用 AI 回复前")]
+        : current.versions,
+      updated_at: new Date().toISOString(),
+    }))
+    setWritingWorkspaceMode("draft")
+    setSavedCreation(null)
+  }
+
+  const handleRestoreDraftVersion = (versionId: string) => {
+    const version = draft.versions.find((item) => item.id === versionId)
+    if (!version) return
+    setDraft((current) => ({
+      ...current,
+      title: version.title,
+      content: version.content,
+      updated_at: new Date().toISOString(),
+    }))
+    setNoteTitle(version.title)
+    setSavedCreation(null)
+  }
+
+  const handleToggleDraftAsset = (path: string) => {
+    setDraft((current) => {
+      const selected = current.selected_asset_paths.includes(path)
+      const selectedPaths = selected
+        ? current.selected_asset_paths.filter((item) => item !== path)
+        : [...current.selected_asset_paths, path]
+      return {
+        ...current,
+        selected_asset_paths: selectedPaths,
+        cover_asset_path: selected
+          ? current.cover_asset_path === path ? selectedPaths[0] ?? null : current.cover_asset_path
+          : current.cover_asset_path ?? path,
+        updated_at: new Date().toISOString(),
+      }
+    })
+    setSavedCreation(null)
+  }
+
+  const handleMoveDraftAsset = (path: string, direction: -1 | 1) => {
+    setDraft((current) => {
+      const index = current.selected_asset_paths.indexOf(path)
+      const nextIndex = index + direction
+      if (index < 0 || nextIndex < 0 || nextIndex >= current.selected_asset_paths.length) return current
+      const selectedPaths = [...current.selected_asset_paths]
+      ;[selectedPaths[index], selectedPaths[nextIndex]] = [selectedPaths[nextIndex], selectedPaths[index]]
+      return { ...current, selected_asset_paths: selectedPaths, updated_at: new Date().toISOString() }
+    })
+    setSavedCreation(null)
+  }
+
+  const handleSetDraftCover = (path: string) => {
+    setDraft((current) => ({
+      ...current,
+      cover_asset_path: path,
+      selected_asset_paths: [path, ...current.selected_asset_paths.filter((item) => item !== path)],
+      updated_at: new Date().toISOString(),
+    }))
+    setSavedCreation(null)
+  }
+
+  const copyDraftText = async (value: string, label: string) => {
+    try {
+      await navigator.clipboard.writeText(value)
+      setCopyNotice(`${label}已复制`)
+      window.setTimeout(() => setCopyNotice(""), 1800)
+    } catch {
+      setChatError(`${label}复制失败，请检查浏览器剪贴板权限`)
     }
   }
 
@@ -576,18 +851,18 @@ export default function AiStudioPage() {
     }
   }
 
-  const handleSave = async () => {
-    if (!canSaveIdea || saving) return
+  const persistCreation = async (): Promise<Creation | null> => {
+    if (!canSaveIdea || saving) return null
     const imageRequirements = imageThreads
       .flatMap((thread) => thread.messages)
       .filter((message) => message.role === "user")
       .map((message) => message.content)
       .join("\n")
-    const savedContent = latestAssistant || imageRequirements || "图片创作灵感"
-    const title = noteTitle.trim() || deriveTitle(savedContent, selectedCarModel)
+    const savedContent = draft.content.trim() || latestAssistant || imageRequirements || "图片创作灵感"
+    const title = draft.title.trim() || noteTitle.trim() || deriveTitle(savedContent, selectedCarModel)
     const activeReference = activeImageThread?.selected_references[0] ?? null
     const conversation = {
-      version: 2 as const,
+      version: 3 as const,
       task,
       messages,
       selected_material_ids: selectedMaterialIds,
@@ -603,6 +878,14 @@ export default function AiStudioPage() {
       image_threads: imageThreads,
       active_image_thread_id: activeImageThreadId,
       uploaded_reference_images: uploadedReferenceImages,
+      writing_plans: writingPlans,
+      active_writing_plan_id: activeWritingPlanId,
+      draft: {
+        ...draft,
+        title: draft.title.trim(),
+        content: draft.content.trim(),
+        updated_at: new Date().toISOString(),
+      },
       prompt_version: status?.prompt_version ?? null,
       saved_at: new Date().toISOString(),
     }
@@ -621,7 +904,7 @@ export default function AiStudioPage() {
     const formData = new FormData()
     formData.append("title", title)
     formData.append("summary", savedContent.slice(0, 500))
-    formData.append("original_content", latestAssistant || imageRequirements)
+    formData.append("original_content", draft.content.trim() || latestAssistant || imageRequirements)
     formData.append("tags", JSON.stringify([
       "AI生成",
       selectedBrand,
@@ -642,10 +925,41 @@ export default function AiStudioPage() {
       setResumedTitle(saved.title)
       setNoteTitle(title)
       window.history.replaceState({}, "", `/ai?resume=${saved.id}`)
+      return saved
     } catch (error) {
       setChatError(error instanceof Error ? error.message : "笔记灵感保存失败")
+      return null
     } finally {
       setSaving(false)
+    }
+  }
+
+  const handleSave = async () => {
+    await persistCreation()
+  }
+
+  const handleExportPackage = async () => {
+    if (!draft.title.trim() || !draft.content.trim() || exportingPackage) return
+    setExportingPackage(true)
+    setChatError("")
+    try {
+      const saved = await persistCreation()
+      if (!saved) return
+      const result = await exportCreationPackage(saved.id)
+      const url = URL.createObjectURL(result.blob)
+      const anchor = document.createElement("a")
+      anchor.href = url
+      anchor.download = result.filename
+      document.body.appendChild(anchor)
+      anchor.click()
+      anchor.remove()
+      URL.revokeObjectURL(url)
+      setCopyNotice("发布包已导出")
+      window.setTimeout(() => setCopyNotice(""), 1800)
+    } catch (error) {
+      setChatError(error instanceof Error ? error.message : "发布包导出失败")
+    } finally {
+      setExportingPackage(false)
     }
   }
 
@@ -864,6 +1178,13 @@ export default function AiStudioPage() {
               setActiveImageThreadId(firstImageThread.id)
               setUploadedReferenceImages([])
               setGeneratingImageThreadId(null)
+              setWritingPlans([])
+              setActiveWritingPlanId(null)
+              setDraft(createEmptyDraft())
+              setWritingWorkspaceMode("chat")
+              setGeneratingDraft(false)
+              setExportingPackage(false)
+              setCopyNotice("")
               setNoteTitle("")
               setSavedCreation(null)
               setFeedbackChoice(null)
@@ -1047,8 +1368,83 @@ export default function AiStudioPage() {
             </div>
           </aside>
 
-          <section className="flex h-[min(75vh,780px)] min-h-[540px] overflow-hidden rounded-lg border bg-card" aria-label="AI 对话">
-            {renderConversation()}
+          <section className="flex h-[min(78vh,840px)] min-h-[580px] flex-col overflow-hidden rounded-lg border bg-card" aria-label="写作工作区">
+            <div className="flex h-12 shrink-0 items-center gap-1 border-b px-3" role="tablist" aria-label="写作工作模式">
+              <button
+                type="button"
+                role="tab"
+                aria-selected={writingWorkspaceMode === "chat"}
+                onClick={() => setWritingWorkspaceMode("chat")}
+                className={cn(
+                  "flex h-8 items-center gap-1.5 rounded-md px-3 text-xs font-medium text-muted-foreground",
+                  writingWorkspaceMode === "chat" && "bg-accent text-accent-foreground"
+                )}
+              >
+                <MessageSquareText className="size-3.5" />
+                AI 对话
+              </button>
+              <button
+                type="button"
+                role="tab"
+                aria-selected={writingWorkspaceMode === "plan"}
+                onClick={() => setWritingWorkspaceMode("plan")}
+                className={cn(
+                  "flex h-8 items-center gap-1.5 rounded-md px-3 text-xs font-medium text-muted-foreground",
+                  writingWorkspaceMode === "plan" && "bg-accent text-accent-foreground"
+                )}
+              >
+                <ListChecks className="size-3.5" />
+                方案选择
+                {writingPlans.length > 0 && <span className="text-[10px]">{writingPlans.length}</span>}
+              </button>
+              <button
+                type="button"
+                role="tab"
+                aria-selected={writingWorkspaceMode === "draft"}
+                onClick={() => setWritingWorkspaceMode("draft")}
+                className={cn(
+                  "flex h-8 items-center gap-1.5 rounded-md px-3 text-xs font-medium text-muted-foreground",
+                  writingWorkspaceMode === "draft" && "bg-accent text-accent-foreground"
+                )}
+              >
+                <FilePenLine className="size-3.5" />
+                最终文稿
+                {draft.content.trim() && <CheckCircle2 className="size-3 text-emerald-600" />}
+              </button>
+            </div>
+            <div className="flex min-h-0 flex-1">
+              {writingWorkspaceMode === "chat" && renderConversation()}
+              {writingWorkspaceMode === "plan" && (
+                <AiPlanWorkspace
+                  plans={writingPlans}
+                  activePlan={activeWritingPlan}
+                  generatingDraft={generatingDraft}
+                  onSelectPlan={handleSelectWritingPlan}
+                  onSelectTitle={handleSelectPlanTitle}
+                  onToggleDirection={handleTogglePlanDirection}
+                  onDevelopDraft={handleDevelopDraft}
+                />
+              )}
+              {writingWorkspaceMode === "draft" && (
+                <AiDraftWorkspace
+                  draft={draft}
+                  latestAssistant={latestAssistant}
+                  exportableImages={exportableDraftImages}
+                  exporting={exportingPackage}
+                  copyNotice={copyNotice}
+                  onTitleChange={(value) => updateDraftField("title", value)}
+                  onContentChange={(value) => updateDraftField("content", value)}
+                  onApplyAssistant={handleApplyAssistant}
+                  onRestoreVersion={handleRestoreDraftVersion}
+                  onToggleAsset={handleToggleDraftAsset}
+                  onMoveAsset={handleMoveDraftAsset}
+                  onSetCover={handleSetDraftCover}
+                  onCopyTitle={() => void copyDraftText(draft.title, "标题")}
+                  onCopyContent={() => void copyDraftText(draft.content, "正文")}
+                  onExport={handleExportPackage}
+                />
+              )}
+            </div>
           </section>
 
           <aside className="space-y-5 lg:col-span-2 xl:col-span-1" aria-label="生成与保存">
