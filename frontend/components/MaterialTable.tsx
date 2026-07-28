@@ -1,27 +1,12 @@
 "use client"
 
-import { useState } from "react"
-import Link from "next/link"
-import { ExternalLink, Heart, Star } from "lucide-react"
-import { Material } from "@/lib/api"
+import { Heart } from "lucide-react"
+import type { Material } from "@/lib/api"
+import { formatMaterialDate, MATERIAL_SCOPE_LABELS, SOURCE_TYPE_LABELS } from "@/lib/materials"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
 import { cn } from "@/lib/utils"
-
-const SOURCE_TYPE_LABELS: Record<string, string> = {
-  self_experience: "自家经验",
-  product资料: "产品资料",
-  customer_feedback: "客户反馈",
-  xiaohongshu: "小红书博主",
-  douyin: "抖音博主",
-  bilibili: "B站内容",
-  competitor: "竞品账号",
-  car_group: "车友群",
-  sales_feedback: "销售反馈",
-  wechat_article: "公众号文章",
-  other: "其他",
-}
 
 interface MaterialTableProps {
   materials: Material[]
@@ -30,80 +15,77 @@ interface MaterialTableProps {
 }
 
 export function MaterialTable({ materials, onToggleFavorite, onRowClick }: MaterialTableProps) {
-  if (materials.length === 0) {
-    return (
-      <div className="text-center py-12 text-muted-foreground">
-        暂无素材，试试调整筛选条件或添加新素材
-      </div>
-    )
-  }
-
   return (
-    <div className="border rounded-lg">
-      <Table>
-        <TableHeader>
-          <TableRow>
-            <TableHead className="w-[300px]">标题</TableHead>
-            <TableHead>品牌</TableHead>
-            <TableHead>车型</TableHead>
-            <TableHead>来源</TableHead>
-            <TableHead>内容类型</TableHead>
-            <TableHead>收藏</TableHead>
-            <TableHead>时间</TableHead>
+    <div className="overflow-hidden rounded-lg border bg-card">
+      <Table className="min-w-[960px]">
+        <TableHeader className="bg-muted/70">
+          <TableRow className="hover:bg-transparent">
+            <TableHead className="w-[36%] px-4">素材内容</TableHead>
+            <TableHead className="w-[15%]">适用范围</TableHead>
+            <TableHead className="w-[15%]">来源</TableHead>
+            <TableHead className="w-[24%]">内容类型</TableHead>
+            <TableHead className="w-[70px] text-center">收藏</TableHead>
+            <TableHead className="w-[82px] pr-4 text-right">新增</TableHead>
           </TableRow>
         </TableHeader>
         <TableBody>
-          {materials.map((m) => (
+          {materials.map((material) => (
             <TableRow
-              key={m.id}
-              className="cursor-pointer hover:bg-zinc-50"
-              onClick={() => onRowClick(m)}
+              key={material.id}
+              className="cursor-pointer hover:bg-muted/40"
+              onClick={() => onRowClick(material)}
             >
-              <TableCell>
-                <div className="flex flex-col gap-1">
-                  <span className="font-medium line-clamp-1">{m.title}</span>
-                  {m.author && (
-                    <span className="text-xs text-muted-foreground">@{m.author}</span>
-                  )}
+              <TableCell className="px-4 py-3">
+                <div className="min-w-0">
+                  <p className="line-clamp-1 font-medium">{material.title}</p>
+                  <p className="mt-1 line-clamp-1 text-xs text-muted-foreground">
+                    {material.summary || "暂无内容概述"}
+                  </p>
                 </div>
               </TableCell>
-              <TableCell>{m.brand || "-"}</TableCell>
-              <TableCell>{m.car_model || "-"}</TableCell>
-              <TableCell>{SOURCE_TYPE_LABELS[m.source_type] || m.source_type}</TableCell>
+              <TableCell className="text-sm">
+                {material.material_scope === "general" ? (
+                  <Badge variant="outline" className="font-normal">{MATERIAL_SCOPE_LABELS.general}</Badge>
+                ) : (
+                  <>
+                    <p>{material.brand || "-"}</p>
+                    {material.car_model && <p className="mt-1 text-xs text-muted-foreground">{material.car_model}</p>}
+                  </>
+                )}
+              </TableCell>
               <TableCell>
-                <div className="flex flex-wrap gap-1">
-                  {m.content_types.slice(0, 2).map((t) => (
-                    <Badge key={t} variant="secondary" className="text-xs">
-                      {t}
-                    </Badge>
+                <p className="text-sm">{SOURCE_TYPE_LABELS[material.source_type] || material.source_type}</p>
+                {material.author && <p className="mt-1 text-xs text-muted-foreground">@{material.author}</p>}
+              </TableCell>
+              <TableCell>
+                <div className="flex flex-wrap gap-1.5">
+                  {material.content_types.slice(0, 2).map((type) => (
+                    <Badge key={type} variant="secondary" className="font-normal">{type}</Badge>
                   ))}
-                  {m.content_types.length > 2 && (
-                    <Badge variant="outline" className="text-xs">
-                      +{m.content_types.length - 2}
+                  {material.content_types.length > 2 && (
+                    <Badge variant="outline" className="font-normal text-muted-foreground">
+                      +{material.content_types.length - 2}
                     </Badge>
                   )}
                 </div>
               </TableCell>
-              <TableCell>
+              <TableCell className="text-center">
                 <Button
                   variant="ghost"
                   size="icon"
-                  className="h-8 w-8"
-                  onClick={(e) => {
-                    e.stopPropagation()
-                    onToggleFavorite(m.id)
+                  className="size-8 text-muted-foreground shadow-none hover:text-primary"
+                  onClick={(event) => {
+                    event.stopPropagation()
+                    onToggleFavorite(material.id)
                   }}
+                  aria-label={material.is_favorite ? "取消收藏" : "收藏素材"}
+                  title={material.is_favorite ? "取消收藏" : "收藏素材"}
                 >
-                  <Heart
-                    className={cn(
-                      "h-4 w-4",
-                      m.is_favorite && "fill-red-500 text-red-500"
-                    )}
-                  />
+                  <Heart className={cn(material.is_favorite && "fill-primary text-primary")} />
                 </Button>
               </TableCell>
-              <TableCell className="text-xs text-muted-foreground">
-                {new Date(m.created_at).toLocaleDateString("zh-CN")}
+              <TableCell className="pr-4 text-right text-xs text-muted-foreground">
+                {formatMaterialDate(material.created_at)}
               </TableCell>
             </TableRow>
           ))}

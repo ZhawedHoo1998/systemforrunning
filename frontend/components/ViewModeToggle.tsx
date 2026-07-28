@@ -11,22 +11,26 @@ interface ViewModeToggleProps {
 
 export function ViewModeToggle({ viewMode, onViewModeChange }: ViewModeToggleProps) {
   return (
-    <div className="flex gap-1 p-1 bg-muted rounded-lg">
+    <div className="grid h-9 w-[76px] grid-cols-2 rounded-md border bg-card p-0.5" aria-label="切换素材视图">
       <Button
-        variant={viewMode === "table" ? "secondary" : "ghost"}
-        size="sm"
-        className="h-8 px-2"
+        variant="ghost"
+        size="icon"
+        className={cn("size-8 rounded-sm shadow-none", viewMode === "table" && "bg-secondary text-foreground")}
         onClick={() => onViewModeChange("table")}
+        aria-label="列表视图"
+        title="列表视图"
       >
-        <List className="h-4 w-4" />
+        <List />
       </Button>
       <Button
-        variant={viewMode === "card" ? "secondary" : "ghost"}
-        size="sm"
-        className="h-8 px-2"
+        variant="ghost"
+        size="icon"
+        className={cn("size-8 rounded-sm shadow-none", viewMode === "card" && "bg-secondary text-foreground")}
         onClick={() => onViewModeChange("card")}
+        aria-label="卡片视图"
+        title="卡片视图"
       >
-        <LayoutGrid className="h-4 w-4" />
+        <LayoutGrid />
       </Button>
     </div>
   )

@@ -4,10 +4,11 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.responses import JSONResponse
 import os
 
-from backend.database import engine, Base
+from backend.database import engine, Base, migrate_material_scope
 from backend.routers import materials
 
 Base.metadata.create_all(bind=engine)
+migrate_material_scope()
 
 app = FastAPI(title="Ruby Rain 香氛素材库 API", version="1.0.0")
 

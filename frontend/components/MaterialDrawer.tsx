@@ -1,33 +1,63 @@
 "use client"
 
 import { useState } from "react"
-import { X, ExternalLink, Trash2, Edit, Heart } from "lucide-react"
-import { Material } from "@/lib/api"
-import { Button } from "@/components/ui/button"
+import Image from "next/image"
+import {
+  Check,
+  Copy,
+  Edit3,
+  ExternalLink,
+  FileText,
+  Heart,
+  Trash2,
+  Video,
+  X,
+} from "lucide-react"
+import type { Material } from "@/lib/api"
+import { isImageAttachment, isVideoAttachment, MATERIAL_SCOPE_LABELS, SOURCE_TYPE_LABELS } from "@/lib/materials"
 import { Badge } from "@/components/ui/badge"
+import { Button } from "@/components/ui/button"
 import { Separator } from "@/components/ui/separator"
 import { cn } from "@/lib/utils"
-
-const SOURCE_TYPE_LABELS: Record<string, string> = {
-  self_experience: "自家经验",
-  product资料: "产品资料",
-  customer_feedback: "客户反馈",
-  xiaohongshu: "小红书博主",
-  douyin: "抖音博主",
-  bilibili: "B站内容",
-  competitor: "竞品账号",
-  car_group: "车友群",
-  sales_feedback: "销售反馈",
-  wechat_article: "公众号文章",
-  other: "其他",
-}
 
 interface MaterialDrawerProps {
   material: Material | null
   onClose: () => void
   onToggleFavorite: (id: string) => void
   onEdit: (material: Material) => void
-  onDelete: (id: string) => void
+  onDelete: (id: string) => Promise<void>
+}
+
+interface ContentSectionProps {
+  id: string
+  title: string
+  content: string
+  copiedSection: string | null
+  onCopy: (id: string, content: string) => void
+  accent?: boolean
+}
+
+function ContentSection({ id, title, content, copiedSection, onCopy, accent }: ContentSectionProps) {
+  const copied = copiedSection === id
+
+  return (
+    <section className={cn("py-5", accent && "border-l-2 border-[#7aa889] bg-insight px-4") }>
+      <div className="mb-2 flex items-center justify-between gap-3">
+        <h3 className="text-sm font-semibold">{title}</h3>
+        <Button
+          variant="ghost"
+          size="icon"
+          className="size-8 shrink-0 text-muted-foreground shadow-none"
+          onClick={() => onCopy(id, content)}
+          aria-label={`复制${title}`}
+          title={`复制${title}`}
+        >
+          {copied ? <Check className="text-insight-foreground" /> : <Copy />}
+        </Button>
+      </div>
+      <p className="whitespace-pre-wrap break-words text-sm leading-7 text-foreground/80">{content}</p>
+    </section>
+  )
 }
 
 export function MaterialDrawer({
@@ -38,167 +68,294 @@ export function MaterialDrawer({
   onDelete,
 }: MaterialDrawerProps) {
   const [isDeleting, setIsDeleting] = useState(false)
+  const [copiedSection, setCopiedSection] = useState<string | null>(null)
 
   if (!material) return null
 
+  const handleCopy = async (id: string, content: string) => {
+    try {
+      await navigator.clipboard.writeText(content)
+      setCopiedSection(id)
+      window.setTimeout(() => setCopiedSection(null), 1600)
+    } catch (error) {
+      console.error("Failed to copy material content", error)
+    }
+  }
+
   const handleDelete = async () => {
-    if (!confirm("确定要删除这个素材吗？")) return
+    if (!window.confirm("确定要删除这个素材吗？此操作无法撤销。")) return
     setIsDeleting(true)
     try {
-      onDelete(material.id)
+      await onDelete(material.id)
     } finally {
       setIsDeleting(false)
     }
   }
 
+  const imageAttachments = material.attachments.filter(isImageAttachment)
+  const videoAttachments = material.attachments.filter(isVideoAttachment)
+  const otherAttachments = material.attachments.filter(
+    (attachment) => !isImageAttachment(attachment) && !isVideoAttachment(attachment)
+  )
+
   return (
     <>
-      <div
-        className="fixed inset-0 bg-black/40 z-40"
-        onClick={onClose}
-      />
-      <div className="fixed right-0 top-0 h-full w-full max-w-lg bg-white shadow-xl z-50 overflow-y-auto">
-        <div className="sticky top-0 bg-white border-b flex items-center justify-between p-4">
-          <h2 className="font-semibold truncate pr-4">{material.title}</h2>
-          <Button variant="ghost" size="icon" onClick={onClose}>
-            <X className="h-5 w-5" />
-          </Button>
-        </div>
-
-        <div className="p-4 space-y-4">
-          <div className="flex flex-wrap gap-2">
-            {material.brand && (
-              <Badge variant="outline">{material.brand}</Badge>
-            )}
-            {material.car_model && (
-              <Badge variant="outline">{material.car_model}</Badge>
-            )}
-            <Badge variant="secondary">
-              {SOURCE_TYPE_LABELS[material.source_type] || material.source_type}
-            </Badge>
+      <div className="fixed inset-0 z-40 bg-black/35 backdrop-blur-[1px]" onClick={onClose} />
+      <aside
+        className="fixed inset-y-0 right-0 z-50 flex w-full max-w-2xl flex-col bg-card shadow-2xl"
+        aria-label="素材详情"
+      >
+        <header className="flex min-h-16 items-center gap-3 border-b px-4 sm:px-6">
+          <div className="min-w-0 flex-1">
+            <p className="text-xs font-medium text-primary">素材详情</p>
+            <h2 className="truncate text-sm font-semibold sm:text-base">{material.title}</h2>
           </div>
+          <Button variant="ghost" size="icon" onClick={onClose} aria-label="关闭详情" title="关闭详情">
+            <X />
+          </Button>
+        </header>
 
-          {material.author && (
-            <div className="text-sm">
-              <span className="text-muted-foreground">作者: </span>
-              <span>{material.author}</span>
+        <div className="flex-1 overflow-y-auto px-4 sm:px-6">
+          <section className="py-6">
+            <div className="flex items-start justify-between gap-4">
+              <div className="min-w-0">
+                <div className="mb-3 flex flex-wrap gap-2">
+                  <Badge className="bg-source font-medium text-source-foreground shadow-none hover:bg-source">
+                    {SOURCE_TYPE_LABELS[material.source_type] || material.source_type}
+                  </Badge>
+                  <Badge variant="secondary">{MATERIAL_SCOPE_LABELS[material.material_scope]}</Badge>
+                  {material.brand && <Badge variant="outline">{material.brand}</Badge>}
+                  {material.car_model && <Badge variant="outline">{material.car_model}</Badge>}
+                </div>
+                <h1 className="text-xl font-semibold leading-8">{material.title}</h1>
+                {material.author && <p className="mt-2 text-sm text-muted-foreground">来自 @{material.author}</p>}
+              </div>
+              <Button
+                variant="outline"
+                size="icon"
+                className="shrink-0"
+                onClick={() => handleCopy("title", material.title)}
+                aria-label="复制标题"
+                title="复制标题"
+              >
+                {copiedSection === "title" ? <Check className="text-insight-foreground" /> : <Copy />}
+              </Button>
             </div>
-          )}
 
-          {material.source_url && (
-            <div className="text-sm">
-              <span className="text-muted-foreground">链接: </span>
+            {material.source_url && (
               <a
                 href={material.source_url}
                 target="_blank"
                 rel="noopener noreferrer"
-                className="text-blue-600 hover:underline inline-flex items-center gap-1"
+                className="mt-4 inline-flex max-w-full items-center gap-1.5 text-sm font-medium text-primary hover:underline"
               >
-                {material.source_url.slice(0, 50)}
-                <ExternalLink className="h-3 w-3" />
+                <span className="truncate">打开原始来源</span>
+                <ExternalLink className="size-3.5 shrink-0" />
               </a>
-            </div>
+            )}
+          </section>
+
+          {imageAttachments.length > 0 && (
+            <section className="border-t py-5">
+              <div className="mb-3 flex items-center justify-between gap-3">
+                <h3 className="text-sm font-semibold">图片预览</h3>
+                <span className="text-xs text-muted-foreground">{imageAttachments.length} 张</span>
+              </div>
+              <div className="grid grid-cols-2 gap-2">
+                {imageAttachments.map((attachment, index) => (
+                  <a
+                    key={`${attachment.path}-${index}`}
+                    href={attachment.path}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className={cn(
+                      "relative aspect-[4/3] overflow-hidden rounded-md border bg-muted",
+                      imageAttachments.length === 1 && "col-span-2 aspect-video"
+                    )}
+                  >
+                    <Image
+                      src={attachment.path}
+                      alt={attachment.name || `${material.title} 图片 ${index + 1}`}
+                      fill
+                      sizes={imageAttachments.length === 1 ? "(max-width: 640px) 100vw, 640px" : "(max-width: 640px) 50vw, 320px"}
+                      className="object-cover"
+                      unoptimized
+                    />
+                  </a>
+                ))}
+              </div>
+            </section>
           )}
 
-          <Separator />
+          {videoAttachments.length > 0 && (
+            <section className="border-t py-5">
+              <div className="mb-3 flex items-center justify-between gap-3">
+                <h3 className="flex items-center gap-2 text-sm font-semibold">
+                  <Video className="size-4 text-primary" />
+                  视频预览
+                </h3>
+                <span className="text-xs text-muted-foreground">{videoAttachments.length} 个</span>
+              </div>
+              <div className="space-y-4">
+                {videoAttachments.map((attachment, index) => (
+                  <div key={`${attachment.path}-${index}`}>
+                    <video
+                      src={attachment.path}
+                      controls
+                      playsInline
+                      preload="metadata"
+                      className="aspect-video w-full rounded-md bg-black"
+                    >
+                      当前浏览器不支持视频播放。
+                    </video>
+                    <div className="mt-2 flex items-center justify-between gap-3 text-xs">
+                      <span className="min-w-0 flex-1 truncate text-muted-foreground">
+                        {attachment.name}
+                      </span>
+                      <a
+                        href={attachment.path}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="inline-flex shrink-0 items-center gap-1 font-medium text-primary hover:underline"
+                      >
+                        打开原视频
+                        <ExternalLink className="size-3" />
+                      </a>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </section>
+          )}
 
-          <div>
-            <h3 className="text-sm font-medium mb-2">内容类型</h3>
-            <div className="flex flex-wrap gap-2">
-              {material.content_types.map((t) => (
-                <Badge key={t} variant="default">{t}</Badge>
+          {(material.content_types.length > 0 || material.tags.length > 0) && (
+            <section className="flex flex-wrap gap-2 border-t py-5">
+              {material.content_types.map((type) => (
+                <Badge key={type} variant="secondary" className="font-normal">{type}</Badge>
               ))}
-            </div>
-          </div>
+              {material.tags.map((tag) => (
+                <Badge key={tag} variant="outline" className="font-normal text-muted-foreground">#{tag}</Badge>
+              ))}
+            </section>
+          )}
+
+          {material.suggest_title && (
+            <>
+              <Separator />
+              <ContentSection
+                id="suggest-title"
+                title="建议标题"
+                content={material.suggest_title}
+                copiedSection={copiedSection}
+                onCopy={handleCopy}
+              />
+            </>
+          )}
 
           {material.summary && (
             <>
               <Separator />
-              <div>
-                <h3 className="text-sm font-medium mb-2">内容概述</h3>
-                <p className="text-sm text-muted-foreground whitespace-pre-wrap">
-                  {material.summary}
-                </p>
-              </div>
+              <ContentSection
+                id="summary"
+                title="内容概述"
+                content={material.summary}
+                copiedSection={copiedSection}
+                onCopy={handleCopy}
+              />
             </>
           )}
 
-          {material.save_reason && (
+          {material.original_content && (
             <>
               <Separator />
-              <div>
-                <h3 className="text-sm font-medium mb-2">为什么保存</h3>
-                <p className="text-sm text-muted-foreground whitespace-pre-wrap">
-                  {material.save_reason}
-                </p>
-              </div>
+              <ContentSection
+                id="original"
+                title="原始内容"
+                content={material.original_content}
+                copiedSection={copiedSection}
+                onCopy={handleCopy}
+              />
             </>
           )}
 
           {material.learning_points && (
             <>
               <Separator />
-              <div>
-                <h3 className="text-sm font-medium mb-2">值得学习</h3>
-                <p className="text-sm text-muted-foreground whitespace-pre-wrap">
-                  {material.learning_points}
-                </p>
-              </div>
+              <ContentSection
+                id="learning"
+                title="值得学习"
+                content={material.learning_points}
+                copiedSection={copiedSection}
+                onCopy={handleCopy}
+                accent
+              />
             </>
           )}
 
-          {material.attachments && material.attachments.length > 0 && (
+          {material.save_reason && (
             <>
               <Separator />
-              <div>
-                <h3 className="text-sm font-medium mb-2">附件</h3>
-                <div className="space-y-2">
-                  {material.attachments.map((att, i) => (
-                    <a
-                      key={i}
-                      href={att.path}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className="flex items-center gap-2 text-sm text-blue-600 hover:underline"
-                    >
-                      {att.name}
-                    </a>
-                  ))}
-                </div>
-              </div>
+              <ContentSection
+                id="reason"
+                title="保存理由"
+                content={material.save_reason}
+                copiedSection={copiedSection}
+                onCopy={handleCopy}
+              />
             </>
           )}
 
-          <Separator />
+          {otherAttachments.length > 0 && (
+            <section className="border-t py-5">
+              <h3 className="mb-3 text-sm font-semibold">其他附件</h3>
+              <div className="space-y-2">
+                {otherAttachments.map((attachment, index) => (
+                    <a
+                      key={`${attachment.path}-${index}`}
+                      href={attachment.path}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="flex items-center gap-2 text-sm text-primary hover:underline"
+                    >
+                      <FileText className="size-4 shrink-0" />
+                      <span className="truncate">{attachment.name}</span>
+                    </a>
+                  ))}
+              </div>
+            </section>
+          )}
 
-          <div className="flex gap-2">
-            <Button
-              variant={material.is_favorite ? "default" : "outline"}
-              className="flex-1 gap-2"
-              onClick={() => onToggleFavorite(material.id)}
-            >
-              <Heart className={cn("h-4 w-4", material.is_favorite && "fill-current")} />
-              {material.is_favorite ? "已收藏" : "收藏"}
-            </Button>
-            <Button variant="outline" className="flex-1 gap-2" onClick={() => onEdit(material)}>
-              <Edit className="h-4 w-4" />
-              编辑
-            </Button>
-            <Button
-              variant="destructive"
-              size="icon"
-              onClick={handleDelete}
-              disabled={isDeleting}
-            >
-              <Trash2 className="h-4 w-4" />
-            </Button>
-          </div>
-
-          <div className="text-xs text-muted-foreground text-center pt-4">
+          <p className="border-t py-5 text-center text-xs text-muted-foreground">
             创建于 {new Date(material.created_at).toLocaleString("zh-CN")}
-          </div>
+          </p>
         </div>
-      </div>
+
+        <footer className="flex items-center gap-2 border-t bg-card px-4 py-3 sm:px-6">
+          <Button
+            variant={material.is_favorite ? "secondary" : "outline"}
+            className={cn("flex-1", material.is_favorite && "text-primary")}
+            onClick={() => onToggleFavorite(material.id)}
+          >
+            <Heart className={cn(material.is_favorite && "fill-primary text-primary")} />
+            {material.is_favorite ? "已收藏" : "收藏"}
+          </Button>
+          <Button variant="outline" className="flex-1" onClick={() => onEdit(material)}>
+            <Edit3 />
+            编辑
+          </Button>
+          <Button
+            variant="ghost"
+            size="icon"
+            className="text-destructive hover:bg-red-50 hover:text-destructive"
+            onClick={handleDelete}
+            disabled={isDeleting}
+            aria-label="删除素材"
+            title="删除素材"
+          >
+            <Trash2 />
+          </Button>
+        </footer>
+      </aside>
     </>
   )
 }

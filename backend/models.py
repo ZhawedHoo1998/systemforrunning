@@ -9,6 +9,7 @@ class Material(Base):
 
     id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
     title = Column(String(500), nullable=False)
+    material_scope = Column(String(20), nullable=False, default="vehicle", index=True)
     brand = Column(String(200), nullable=True)
     car_model = Column(String(200), nullable=True)
     source_type = Column(String(50), nullable=False)

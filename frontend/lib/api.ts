@@ -1,8 +1,24 @@
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"
 
+export type MaterialScope = "vehicle" | "general"
+
+async function throwApiError(response: Response, fallback: string): Promise<never> {
+  let message = fallback
+
+  try {
+    const payload = await response.json()
+    if (typeof payload.detail === "string") message = payload.detail
+  } catch {
+    // Some endpoints can return an empty or non-JSON error response.
+  }
+
+  throw new Error(message)
+}
+
 export interface Material {
   id: string
   title: string
+  material_scope: MaterialScope
   brand: string | null
   car_model: string | null
   source_type: string
@@ -26,6 +42,7 @@ export interface Attachment {
   name: string
   path: string
   type: string
+  size?: number
 }
 
 export interface MaterialsResponse {
@@ -35,15 +52,28 @@ export interface MaterialsResponse {
   page_size: number
 }
 
+export interface MaterialFacets {
+  total: number
+  content_types: Record<string, number>
+}
+
 export interface Options {
   brands: string[]
   car_models: string[]
+  vehicles: VehicleOption[]
   source_types: [string, string][]
   content_types: string[]
+  content_type_groups: Record<MaterialScope, string[]>
+}
+
+export interface VehicleOption {
+  brand: string
+  car_model: string
 }
 
 export async function getMaterials(params: {
   q?: string
+  material_scope?: MaterialScope
   brand?: string
   car_model?: string
   source_type?: string
@@ -56,6 +86,7 @@ export async function getMaterials(params: {
 }): Promise<MaterialsResponse> {
   const sp = new URLSearchParams()
   if (params.q) sp.set("q", params.q)
+  if (params.material_scope) sp.set("material_scope", params.material_scope)
   if (params.brand) sp.set("brand", params.brand)
   if (params.car_model) sp.set("car_model", params.car_model)
   if (params.source_type) sp.set("source_type", params.source_type)
@@ -67,13 +98,13 @@ export async function getMaterials(params: {
   if (params.page_size) sp.set("page_size", String(params.page_size))
 
   const res = await fetch(`${API_BASE}/api/materials?${sp.toString()}`)
-  if (!res.ok) throw new Error("Failed to fetch materials")
+  if (!res.ok) await throwApiError(res, "素材加载失败，请稍后重试")
   return res.json()
 }
 
 export async function getMaterial(id: string): Promise<Material> {
   const res = await fetch(`${API_BASE}/api/materials/${id}`)
-  if (!res.ok) throw new Error("Failed to fetch material")
+  if (!res.ok) await throwApiError(res, "素材详情加载失败")
   return res.json()
 }
 
@@ -82,7 +113,7 @@ export async function createMaterial(formData: FormData): Promise<Material> {
     method: "POST",
     body: formData,
   })
-  if (!res.ok) throw new Error("Failed to create material")
+  if (!res.ok) await throwApiError(res, "添加素材失败，请检查必填项")
   return res.json()
 }
 
@@ -91,7 +122,7 @@ export async function updateMaterial(id: string, formData: FormData): Promise<Ma
     method: "PUT",
     body: formData,
   })
-  if (!res.ok) throw new Error("Failed to update material")
+  if (!res.ok) await throwApiError(res, "保存素材失败，请稍后重试")
   return res.json()
 }
 
@@ -99,31 +130,45 @@ export async function deleteMaterial(id: string): Promise<void> {
   const res = await fetch(`${API_BASE}/api/materials/${id}`, {
     method: "DELETE",
   })
-  if (!res.ok) throw new Error("Failed to delete material")
+  if (!res.ok) await throwApiError(res, "删除素材失败")
 }
 
 export async function toggleFavorite(id: string): Promise<Material> {
   const res = await fetch(`${API_BASE}/api/materials/${id}/favorite`, {
     method: "POST",
   })
-  if (!res.ok) throw new Error("Failed to toggle favorite")
+  if (!res.ok) await throwApiError(res, "收藏状态更新失败")
   return res.json()
 }
 
 export async function getFavorites(page = 1, pageSize = 20): Promise<MaterialsResponse> {
   const res = await fetch(`${API_BASE}/api/materials/favorites?page=${page}&page_size=${pageSize}`)
-  if (!res.ok) throw new Error("Failed to fetch favorites")
+  if (!res.ok) await throwApiError(res, "收藏素材加载失败")
   return res.json()
 }
 
 export async function getRecent(limit = 30): Promise<Material[]> {
   const res = await fetch(`${API_BASE}/api/materials/recent?limit=${limit}`)
-  if (!res.ok) throw new Error("Failed to fetch recent materials")
+  if (!res.ok) await throwApiError(res, "最近素材加载失败")
   return res.json()
 }
 
 export async function getOptions(): Promise<Options> {
   const res = await fetch(`${API_BASE}/api/materials/options`)
-  if (!res.ok) throw new Error("Failed to fetch options")
+  if (!res.ok) await throwApiError(res, "筛选项加载失败")
+  return res.json()
+}
+
+export async function getMaterialFacets(params: {
+  material_scope: MaterialScope
+  brand?: string
+  car_model?: string
+}): Promise<MaterialFacets> {
+  const sp = new URLSearchParams({ material_scope: params.material_scope })
+  if (params.brand) sp.set("brand", params.brand)
+  if (params.car_model) sp.set("car_model", params.car_model)
+
+  const res = await fetch(`${API_BASE}/api/materials/facets?${sp.toString()}`)
+  if (!res.ok) await throwApiError(res, "素材分类统计加载失败")
   return res.json()
 }

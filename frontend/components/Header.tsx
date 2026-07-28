@@ -1,75 +1,106 @@
 "use client"
 
-import { useState } from "react"
 import Link from "next/link"
 import { usePathname } from "next/navigation"
-import { Heart, Clock, Search, Plus } from "lucide-react"
+import { CarFront, Clock3, Heart, Lightbulb, Plus, Search } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
+import { cn } from "@/lib/utils"
 
 interface HeaderProps {
-  onSearch: (q: string) => void
+  onSearch: (query: string) => void
   onAddClick: () => void
   searchValue: string
 }
+
+const navigation = [
+  { href: "/", label: "车型素材", icon: CarFront },
+  { href: "/inspiration", label: "灵感中心", icon: Lightbulb },
+  { href: "/favorites", label: "我的收藏", icon: Heart },
+  { href: "/recent", label: "最近新增", icon: Clock3 },
+]
 
 export function Header({ onSearch, onAddClick, searchValue }: HeaderProps) {
   const pathname = usePathname()
 
   return (
-    <header className="sticky top-0 z-40 w-full border-b bg-white/95 backdrop-blur supports-[backdrop-filter]:bg-white/60">
-      <div className="container flex h-14 items-center gap-4">
-        <div className="flex items-center gap-2">
-          <span className="text-lg font-semibold">香氛素材库</span>
-        </div>
+    <header className="sticky top-0 z-40 border-b bg-card/95 backdrop-blur">
+      <div className="app-container flex h-16 items-center gap-3 lg:gap-5">
+        <Link href="/" className="flex shrink-0 items-center gap-2.5" aria-label="Ruby Rain 素材库首页">
+          <span className="grid size-9 place-items-center rounded-md bg-primary font-semibold text-primary-foreground">
+            R
+          </span>
+          <span className="hidden leading-tight sm:block">
+            <strong className="block text-sm font-semibold">Ruby Rain</strong>
+            <span className="block text-[11px] text-muted-foreground">内容素材库</span>
+          </span>
+        </Link>
 
-        <nav className="flex items-center gap-1 ml-4">
-          <Link href="/">
-            <Button
-              variant={pathname === "/" ? "secondary" : "ghost"}
-              size="sm"
-              className="gap-2"
-            >
-              <Search className="h-4 w-4" />
-              素材库
-            </Button>
-          </Link>
-          <Link href="/favorites">
-            <Button
-              variant={pathname === "/favorites" ? "secondary" : "ghost"}
-              size="sm"
-              className="gap-2"
-            >
-              <Heart className="h-4 w-4" />
-              我的收藏
-            </Button>
-          </Link>
-          <Link href="/recent">
-            <Button
-              variant={pathname === "/recent" ? "secondary" : "ghost"}
-              size="sm"
-              className="gap-2"
-            >
-              <Clock className="h-4 w-4" />
-              最近新增
-            </Button>
-          </Link>
+        <nav className="hidden items-center gap-1 lg:flex" aria-label="主导航">
+          {navigation.map(({ href, label, icon: Icon }) => {
+            const active = pathname === href
+            return (
+              <Button
+                key={href}
+                asChild
+                variant="ghost"
+                size="sm"
+                className={cn(
+                  "h-9 px-3 text-muted-foreground shadow-none",
+                  active && "bg-accent text-accent-foreground"
+                )}
+              >
+                <Link href={href} aria-current={active ? "page" : undefined}>
+                  <Icon />
+                  {label}
+                </Link>
+              </Button>
+            )
+          })}
         </nav>
 
-        <div className="flex-1 max-w-md ml-auto">
+        <div className="relative ml-auto min-w-0 flex-1 sm:max-w-md">
+          <Search className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
           <Input
-            placeholder="搜索标题、车型、作者..."
+            type="search"
+            aria-label="搜索素材"
+            placeholder="搜索标题、车型、作者或标签"
             value={searchValue}
-            onChange={(e) => onSearch(e.target.value)}
-            className="h-9"
+            onChange={(event) => onSearch(event.target.value)}
+            className="h-10 bg-background pl-9 shadow-none"
           />
         </div>
 
-        <Button onClick={onAddClick} size="sm" className="gap-2">
-          <Plus className="h-4 w-4" />
-          添加素材
+        <Button
+          onClick={onAddClick}
+          className="h-10 shrink-0 px-3 sm:px-4"
+          aria-label="添加素材"
+          title="添加素材"
+        >
+          <Plus />
+          <span className="hidden sm:inline">添加素材</span>
         </Button>
       </div>
+
+      <nav className="app-container flex h-11 items-stretch gap-0.5 border-t lg:hidden" aria-label="移动端导航">
+        {navigation.map(({ href, label, icon: Icon }) => {
+          const active = pathname === href
+          return (
+            <Link
+              key={href}
+              href={href}
+              aria-current={active ? "page" : undefined}
+              className={cn(
+                "flex flex-1 items-center justify-center gap-1.5 border-b-2 border-transparent text-xs text-muted-foreground",
+                active && "border-primary font-medium text-primary"
+              )}
+            >
+              <Icon className="size-3.5" />
+              {label}
+            </Link>
+          )
+        })}
+      </nav>
     </header>
   )
 }

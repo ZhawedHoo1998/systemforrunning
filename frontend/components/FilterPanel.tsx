@@ -1,9 +1,9 @@
 "use client"
 
-import { useState } from "react"
-import { Filter, X } from "lucide-react"
+import { RotateCcw, SlidersHorizontal } from "lucide-react"
 import { Button } from "@/components/ui/button"
-import { Badge } from "@/components/ui/badge"
+import { Checkbox } from "@/components/ui/checkbox"
+import { Label } from "@/components/ui/label"
 import {
   Select,
   SelectContent,
@@ -31,16 +31,29 @@ interface FilterPanelProps {
     content_types: string[]
   }
   className?: string
+  showVehicleFilters?: boolean
+  showContentTypes?: boolean
 }
 
-export function FilterPanel({ filters, onFilterChange, options, className }: FilterPanelProps) {
-  const [showContentTypes, setShowContentTypes] = useState(false)
+const ALL_VALUE = "__all__"
+
+export function FilterPanel({
+  filters,
+  onFilterChange,
+  options,
+  className,
+  showVehicleFilters = true,
+  showContentTypes = true,
+}: FilterPanelProps) {
+  const handleSelect = (key: "brand" | "car_model" | "source_type", value: string) => {
+    onFilterChange({ ...filters, [key]: value === ALL_VALUE ? "" : value })
+  }
 
   const handleContentTypeToggle = (type: string) => {
-    const newTypes = filters.content_types.includes(type)
-      ? filters.content_types.filter((t) => t !== type)
+    const contentTypes = filters.content_types.includes(type)
+      ? filters.content_types.filter((item) => item !== type)
       : [...filters.content_types, type]
-    onFilterChange({ ...filters, content_types: newTypes })
+    onFilterChange({ ...filters, content_types: contentTypes })
   }
 
   const clearFilters = () => {
@@ -53,112 +66,123 @@ export function FilterPanel({ filters, onFilterChange, options, className }: Fil
     })
   }
 
-  const hasActiveFilters =
-    filters.brand ||
-    filters.car_model ||
-    filters.source_type ||
-    filters.content_types.length > 0 ||
-    filters.is_favorite !== null
+  const activeCount = [
+    filters.brand,
+    filters.car_model,
+    filters.source_type,
+    ...filters.content_types,
+    filters.is_favorite === true ? "favorite" : "",
+  ].filter(Boolean).length
 
   return (
-    <div className={cn("flex flex-wrap items-center gap-2 p-3 bg-zinc-50 rounded-lg", className)}>
-      <div className="flex items-center gap-1 text-sm text-muted-foreground">
-        <Filter className="h-4 w-4" />
-        <span>筛选:</span>
-      </div>
-
-      <Select
-        value={filters.brand}
-        onValueChange={(v) => onFilterChange({ ...filters, brand: v })}
-      >
-        <SelectTrigger className="h-8 w-[140px]">
-          <SelectValue placeholder="品牌" />
-        </SelectTrigger>
-        <SelectContent>
-          <SelectItem value="__all__">全部品牌</SelectItem>
-          {options.brands.map((b) => (
-            <SelectItem key={b} value={b}>{b}</SelectItem>
-          ))}
-        </SelectContent>
-      </Select>
-
-      <Select
-        value={filters.car_model}
-        onValueChange={(v) => onFilterChange({ ...filters, car_model: v })}
-      >
-        <SelectTrigger className="h-8 w-[140px]">
-          <SelectValue placeholder="车型" />
-        </SelectTrigger>
-        <SelectContent>
-          <SelectItem value="__all__">全部车型</SelectItem>
-          {options.car_models.map((c) => (
-            <SelectItem key={c} value={c}>{c}</SelectItem>
-          ))}
-        </SelectContent>
-      </Select>
-
-      <Select
-        value={filters.source_type}
-        onValueChange={(v) => onFilterChange({ ...filters, source_type: v })}
-      >
-        <SelectTrigger className="h-8 w-[140px]">
-          <SelectValue placeholder="来源" />
-        </SelectTrigger>
-        <SelectContent>
-          <SelectItem value="__all__">全部来源</SelectItem>
-          {options.source_types.map(([k, v]) => (
-            <SelectItem key={k} value={k}>{v}</SelectItem>
-          ))}
-        </SelectContent>
-      </Select>
-
-      <div className="relative">
-        <Button
-          variant={filters.content_types.length > 0 ? "secondary" : "outline"}
-          size="sm"
-          className="h-8 gap-1"
-          onClick={() => setShowContentTypes(!showContentTypes)}
-        >
-          内容类型 {filters.content_types.length > 0 && `(${filters.content_types.length})`}
-        </Button>
-        {showContentTypes && (
-          <div className="absolute top-full left-0 mt-1 z-50 bg-white rounded-lg border shadow-lg p-3 min-w-[300px]">
-            <div className="flex flex-wrap gap-2">
-              {options.content_types.map((type) => (
-                <Badge
-                  key={type}
-                  variant={filters.content_types.includes(type) ? "default" : "outline"}
-                  className="cursor-pointer"
-                  onClick={() => handleContentTypeToggle(type)}
-                >
-                  {type}
-                </Badge>
-              ))}
-            </div>
-          </div>
+    <aside className={cn("rounded-lg border bg-card p-4", className)} aria-label="素材筛选">
+      <div className="flex items-center justify-between border-b pb-3">
+        <div className="flex items-center gap-2">
+          <SlidersHorizontal className="size-4 text-primary" />
+          <h2 className="text-sm font-semibold">筛选素材</h2>
+          {activeCount > 0 && (
+            <span className="grid size-5 place-items-center rounded-full bg-accent text-[11px] font-semibold text-accent-foreground">
+              {activeCount}
+            </span>
+          )}
+        </div>
+        {activeCount > 0 && (
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon"
+            className="size-8 text-muted-foreground"
+            onClick={clearFilters}
+            aria-label="清除全部筛选"
+            title="清除全部筛选"
+          >
+            <RotateCcw />
+          </Button>
         )}
       </div>
 
-      <Button
-        variant={filters.is_favorite === true ? "default" : "outline"}
-        size="sm"
-        className="h-8"
-        onClick={() =>
-          onFilterChange({
-            ...filters,
-            is_favorite: filters.is_favorite === true ? null : true,
-          })
-        }
-      >
-        只看收藏
-      </Button>
+      <div className={cn("grid gap-4 pt-4 lg:grid-cols-1", showVehicleFilters && "sm:grid-cols-3")}>
+        {showVehicleFilters && (
+          <>
+            <div className="space-y-1.5">
+              <Label className="text-xs text-muted-foreground">品牌</Label>
+              <Select value={filters.brand || ALL_VALUE} onValueChange={(value) => handleSelect("brand", value)}>
+                <SelectTrigger className="w-full bg-background shadow-none">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value={ALL_VALUE}>全部品牌</SelectItem>
+                  {options.brands.map((brand) => (
+                    <SelectItem key={brand} value={brand}>{brand}</SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
 
-      {hasActiveFilters && (
-        <Button variant="ghost" size="sm" className="h-8 gap-1" onClick={clearFilters}>
-          <X className="h-4 w-4" />
-          清除筛选
-        </Button>
+            <div className="space-y-1.5">
+              <Label className="text-xs text-muted-foreground">车型</Label>
+              <Select value={filters.car_model || ALL_VALUE} onValueChange={(value) => handleSelect("car_model", value)}>
+                <SelectTrigger className="w-full bg-background shadow-none">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value={ALL_VALUE}>全部车型</SelectItem>
+                  {options.car_models.map((model) => (
+                    <SelectItem key={model} value={model}>{model}</SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+          </>
+        )}
+
+        <div className="space-y-1.5">
+          <Label className="text-xs text-muted-foreground">素材来源</Label>
+          <Select value={filters.source_type || ALL_VALUE} onValueChange={(value) => handleSelect("source_type", value)}>
+            <SelectTrigger className="w-full bg-background shadow-none">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value={ALL_VALUE}>全部来源</SelectItem>
+              {options.source_types.map(([value, label]) => (
+                <SelectItem key={value} value={value}>{label}</SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </div>
+      </div>
+
+      {showContentTypes && (
+        <div className="mt-5 border-t pt-4">
+          <p className="mb-3 text-xs font-medium text-muted-foreground">内容类型</p>
+          <div className="grid grid-cols-2 gap-x-3 gap-y-2.5 sm:grid-cols-3 lg:grid-cols-1">
+            {options.content_types.map((type) => {
+              const checked = filters.content_types.includes(type)
+              return (
+                <label key={type} className="flex min-w-0 cursor-pointer items-center gap-2 text-sm">
+                  <Checkbox
+                    checked={checked}
+                    onCheckedChange={() => handleContentTypeToggle(type)}
+                    aria-label={type}
+                  />
+                  <span className="truncate">{type}</span>
+                </label>
+              )
+            })}
+          </div>
+        </div>
       )}
-    </div>
+
+      <label className="mt-5 flex cursor-pointer items-center gap-2 border-t pt-4 text-sm font-medium">
+        <Checkbox
+          checked={filters.is_favorite === true}
+          onCheckedChange={(checked) =>
+            onFilterChange({ ...filters, is_favorite: checked === true ? true : null })
+          }
+          aria-label="只看收藏"
+        />
+        只看收藏
+      </label>
+    </aside>
   )
 }
