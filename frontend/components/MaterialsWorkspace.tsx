@@ -7,6 +7,7 @@ import { CollectionContent } from "@/components/CollectionContent"
 import { FilterPanel, type FilterState } from "@/components/FilterPanel"
 import { Header } from "@/components/Header"
 import { MaterialDrawer } from "@/components/MaterialDrawer"
+import { TitleInspirationGallery } from "@/components/TitleInspirationGallery"
 import { ViewModeToggle } from "@/components/ViewModeToggle"
 import { Button } from "@/components/ui/button"
 import {
@@ -269,6 +270,7 @@ export function MaterialsWorkspace({ scope }: MaterialsWorkspaceProps) {
 
   const totalPages = Math.ceil(total / PAGE_SIZE)
   const activeContentType = filters.content_types[0] ?? ""
+  const isTitleInspirationView = !isVehicleWorkspace && activeContentType === "标题灵感"
 
   return (
     <div className="min-h-screen">
@@ -391,19 +393,32 @@ export function MaterialsWorkspace({ scope }: MaterialsWorkspaceProps) {
                   <p className="text-sm text-muted-foreground">
                     {loading ? "正在加载" : `当前显示 ${materials.length} 条`}
                   </p>
-                  <ViewModeToggle viewMode={viewMode} onViewModeChange={setViewMode} />
+                  {!isTitleInspirationView && (
+                    <ViewModeToggle viewMode={viewMode} onViewModeChange={setViewMode} />
+                  )}
                 </div>
 
-                <CollectionContent
-                  materials={materials}
-                  loading={loading}
-                  viewMode={viewMode}
-                  onToggleFavorite={handleToggleFavorite}
-                  onSelect={setSelectedMaterial}
-                  onAdd={openAddModal}
-                  emptyTitle={activeContentType ? `暂无${activeContentType}素材` : "还没有匹配的素材"}
-                  emptyDescription={search ? "换个关键词继续查找" : "可以直接添加一条新素材"}
-                />
+                {isTitleInspirationView ? (
+                  <TitleInspirationGallery
+                    materials={materials}
+                    loading={loading}
+                    onToggleFavorite={handleToggleFavorite}
+                    onSelect={setSelectedMaterial}
+                    onAdd={openAddModal}
+                    emptyDescription={search ? "换个关键词继续查找" : "可以添加标题和对应主图"}
+                  />
+                ) : (
+                  <CollectionContent
+                    materials={materials}
+                    loading={loading}
+                    viewMode={viewMode}
+                    onToggleFavorite={handleToggleFavorite}
+                    onSelect={setSelectedMaterial}
+                    onAdd={openAddModal}
+                    emptyTitle={activeContentType ? `暂无${activeContentType}素材` : "还没有匹配的素材"}
+                    emptyDescription={search ? "换个关键词继续查找" : "可以直接添加一条新素材"}
+                  />
+                )}
 
                 {totalPages > 1 && (
                   <div className="mt-6 flex items-center justify-center gap-3">

@@ -132,6 +132,59 @@ function createImageThread(index: number, id = `image-thread-${Date.now()}-${ind
   }
 }
 
+function cleanAiMessages(messages: AiMessage[] | null | undefined): AiMessage[] {
+  return (messages ?? []).flatMap((message) => {
+    const content = message.content?.trim()
+    return content ? [{ ...message, content }] : []
+  })
+}
+
+function createWorkspaceSnapshot({
+  task,
+  messages,
+  input,
+  selectedMaterialIds,
+  selectedBrand,
+  selectedCarModel,
+  imageThreads,
+  activeImageThreadId,
+  uploadedReferenceImages,
+  writingPlans,
+  activeWritingPlanId,
+  draft,
+  noteTitle,
+}: {
+  task: AiTask
+  messages: AiMessage[]
+  input: string
+  selectedMaterialIds: string[]
+  selectedBrand: string
+  selectedCarModel: string
+  imageThreads: AiImageThread[]
+  activeImageThreadId: string
+  uploadedReferenceImages: Attachment[]
+  writingPlans: AiWritingPlan[]
+  activeWritingPlanId: string | null
+  draft: AiDraft
+  noteTitle: string
+}) {
+  return JSON.stringify({
+    task,
+    messages,
+    input,
+    selected_material_ids: selectedMaterialIds,
+    brand: selectedBrand,
+    car_model: selectedCarModel,
+    image_threads: imageThreads,
+    active_image_thread_id: activeImageThreadId,
+    uploaded_reference_images: uploadedReferenceImages,
+    writing_plans: writingPlans,
+    active_writing_plan_id: activeWritingPlanId,
+    draft,
+    note_title: noteTitle,
+  })
+}
+
 function deriveTitle(content: string, carModel: string) {
   const firstLine = content
     .split("\n")
@@ -183,6 +236,7 @@ export default function AiStudioPage() {
   const [noteTitle, setNoteTitle] = useState("")
   const [saving, setSaving] = useState(false)
   const [savedCreation, setSavedCreation] = useState<Creation | null>(null)
+  const [savedWorkspaceSnapshot, setSavedWorkspaceSnapshot] = useState<string | null>(null)
   const [resumedCreationId, setResumedCreationId] = useState<string | null>(null)
   const [resumedTitle, setResumedTitle] = useState("")
   const [feedbackChoice, setFeedbackChoice] = useState<"helpful" | "unhelpful" | null>(null)
@@ -216,6 +270,7 @@ export default function AiStudioPage() {
     getCreation(creationId)
       .then(async (creation) => {
         const conversation = creation.ai_conversation
+        const restoredMessages = cleanAiMessages(conversation.messages)
 
         const selectedResults = await Promise.allSettled(
           conversation.selected_material_ids.map((id) => getMaterial(id))
@@ -263,7 +318,7 @@ export default function AiStudioPage() {
         setResumedCreationId(creation.id)
         setResumedTitle(creation.title)
         setTask(conversation.task)
-        setMessages(conversation.messages)
+        setMessages(restoredMessages)
         setSelectedMaterials(restoredMaterials)
         setScopeFilter(conversation.scope_filter || "all")
         setMaterialSearch(conversation.material_search || "")
@@ -274,16 +329,33 @@ export default function AiStudioPage() {
         setUploadedReferenceImages(conversation.uploaded_reference_images || [])
         const restoredPlans = conversation.writing_plans || []
         const restoredDraft = conversation.draft || createEmptyDraft()
-        setWritingPlans(restoredPlans)
-        setActiveWritingPlanId(
-          restoredPlans.some((plan) => plan.id === conversation.active_writing_plan_id)
-            ? conversation.active_writing_plan_id!
-            : restoredPlans[0]?.id ?? null
+        const restoredActivePlanId = restoredPlans.some(
+          (plan) => plan.id === conversation.active_writing_plan_id
         )
+          ? conversation.active_writing_plan_id!
+          : restoredPlans[0]?.id ?? null
+        const restoredTitle = restoredDraft.title || creation.title
+        setWritingPlans(restoredPlans)
+        setActiveWritingPlanId(restoredActivePlanId)
         setDraft(restoredDraft)
         setWritingWorkspaceMode(restoredDraft.content ? "draft" : restoredPlans.length > 0 ? "plan" : "chat")
-        setNoteTitle(restoredDraft.title || creation.title)
+        setNoteTitle(restoredTitle)
         setSavedCreation(null)
+        setSavedWorkspaceSnapshot(createWorkspaceSnapshot({
+          task: conversation.task,
+          messages: restoredMessages,
+          input: "",
+          selectedMaterialIds: restoredMaterials.map((material) => material.id),
+          selectedBrand: conversation.brand || "",
+          selectedCarModel: conversation.car_model || "",
+          imageThreads: restoredThreads,
+          activeImageThreadId: restoredActiveThreadId,
+          uploadedReferenceImages: conversation.uploaded_reference_images || [],
+          writingPlans: restoredPlans,
+          activeWritingPlanId: restoredActivePlanId,
+          draft: restoredDraft,
+          noteTitle: restoredTitle,
+        }))
       })
       .catch((error) => {
         if (active) setChatError(error instanceof Error ? error.message : "AI 会话恢复失败")
@@ -405,6 +477,94 @@ export default function AiStudioPage() {
   const imageReady = Boolean(status?.image_configured)
   const hasImageResults = generatedImages.length > 0
   const canSaveIdea = Boolean(latestAssistant || hasImageResults || draft.title.trim() || draft.content.trim())
+  const workspaceSnapshot = useMemo(() => createWorkspaceSnapshot({
+    task,
+    messages,
+    input,
+    selectedMaterialIds,
+    selectedBrand,
+    selectedCarModel,
+    imageThreads,
+    activeImageThreadId,
+    uploadedReferenceImages,
+    writingPlans,
+    activeWritingPlanId,
+    draft,
+    noteTitle,
+  }), [
+    task,
+    messages,
+    input,
+    selectedMaterialIds,
+    selectedBrand,
+    selectedCarModel,
+    imageThreads,
+    activeImageThreadId,
+    uploadedReferenceImages,
+    writingPlans,
+    activeWritingPlanId,
+    draft,
+    noteTitle,
+  ])
+  const hasWorkspaceContent = Boolean(
+    input.trim()
+    || messages.some((message) => message.content.trim())
+    || selectedMaterialIds.length
+    || writingPlans.length
+    || draft.title.trim()
+    || draft.content.trim()
+    || uploadedReferenceImages.length
+    || imageThreads.some((thread) => (
+      thread.image_prompt.trim()
+      || thread.selected_references.length
+      || thread.generated_images.length
+      || thread.messages.length
+    ))
+  )
+  const hasUnsavedChanges = hasWorkspaceContent && workspaceSnapshot !== savedWorkspaceSnapshot
+
+  useEffect(() => {
+    if (!hasUnsavedChanges) return
+
+    let restoringHistory = false
+    const handleBeforeUnload = (event: BeforeUnloadEvent) => {
+      event.preventDefault()
+      event.returnValue = ""
+    }
+    const handleNavigationClick = (event: MouseEvent) => {
+      if (event.defaultPrevented || event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) {
+        return
+      }
+      const target = event.target instanceof Element ? event.target : null
+      const anchor = target?.closest("a[href]")
+      if (!anchor || anchor.hasAttribute("download") || anchor.getAttribute("target") === "_blank") return
+      const destination = new URL(anchor.getAttribute("href") || "", window.location.href)
+      if (destination.href === window.location.href || destination.hash && destination.pathname === window.location.pathname) return
+      if (!window.confirm("当前 AI 创作尚未保存，离开后本次操作会丢失。确定离开吗？")) {
+        event.preventDefault()
+        event.stopPropagation()
+      }
+    }
+    const handlePopState = () => {
+      if (restoringHistory) {
+        restoringHistory = false
+        return
+      }
+      if (!window.confirm("当前 AI 创作尚未保存，离开后本次操作会丢失。确定离开吗？")) {
+        restoringHistory = true
+        window.history.go(1)
+      }
+    }
+
+    window.addEventListener("beforeunload", handleBeforeUnload)
+    window.addEventListener("popstate", handlePopState)
+    document.addEventListener("click", handleNavigationClick, true)
+    return () => {
+      window.removeEventListener("beforeunload", handleBeforeUnload)
+      window.removeEventListener("popstate", handlePopState)
+      document.removeEventListener("click", handleNavigationClick, true)
+    }
+  }, [hasUnsavedChanges])
 
   const toggleMaterial = (material: Material) => {
     setSelectedMaterials((current) =>
@@ -550,7 +710,8 @@ export default function AiStudioPage() {
                 ? { role: "assistant", content: fullResponse }
                 : message
             ))
-          }
+          },
+          setChatError,
         )
       }
       if (fullResponse && !noteTitle && task !== "concept" && task !== "title") {
@@ -655,7 +816,8 @@ export default function AiStudioPage() {
             content: fullResponse,
             updated_at: new Date().toISOString(),
           }))
-        }
+        },
+        setChatError,
       )
       setDraft((current) => ({
         ...current,
@@ -853,6 +1015,7 @@ export default function AiStudioPage() {
 
   const persistCreation = async (): Promise<Creation | null> => {
     if (!canSaveIdea || saving) return null
+    const messagesToSave = cleanAiMessages(messages)
     const imageRequirements = imageThreads
       .flatMap((thread) => thread.messages)
       .filter((message) => message.role === "user")
@@ -864,7 +1027,7 @@ export default function AiStudioPage() {
     const conversation = {
       version: 3 as const,
       task,
-      messages,
+      messages: messagesToSave,
       selected_material_ids: selectedMaterialIds,
       scope_filter: scopeFilter,
       material_search: materialSearch,
@@ -924,6 +1087,21 @@ export default function AiStudioPage() {
       setResumedCreationId(saved.id)
       setResumedTitle(saved.title)
       setNoteTitle(title)
+      setSavedWorkspaceSnapshot(createWorkspaceSnapshot({
+        task,
+        messages: messagesToSave,
+        input,
+        selectedMaterialIds,
+        selectedBrand,
+        selectedCarModel,
+        imageThreads,
+        activeImageThreadId,
+        uploadedReferenceImages,
+        writingPlans,
+        activeWritingPlanId,
+        draft,
+        noteTitle: title,
+      }))
       window.history.replaceState({}, "", `/ai?resume=${saved.id}`)
       return saved
     } catch (error) {
@@ -961,6 +1139,43 @@ export default function AiStudioPage() {
     } finally {
       setExportingPackage(false)
     }
+  }
+
+  const handleResetWorkspace = () => {
+    if (hasUnsavedChanges && !window.confirm("当前 AI 创作尚未保存，清空后无法恢复。确定清空吗？")) return
+
+    setTask("concept")
+    setMessages([])
+    setInput("")
+    setSelectedMaterials([])
+    setScopeFilter("all")
+    setMaterialSearch("")
+    setSelectedBrand("")
+    setSelectedCarModel("")
+    setMaterialsLoading(true)
+    const firstImageThread = createImageThread(1)
+    setImageThreads([firstImageThread])
+    setActiveImageThreadId(firstImageThread.id)
+    setUploadedReferenceImages([])
+    setGeneratingImageThreadId(null)
+    setWritingPlans([])
+    setActiveWritingPlanId(null)
+    setDraft(createEmptyDraft())
+    setWritingWorkspaceMode("chat")
+    setGeneratingDraft(false)
+    setExportingPackage(false)
+    setCopyNotice("")
+    setNoteTitle("")
+    setSavedCreation(null)
+    setSavedWorkspaceSnapshot(null)
+    setFeedbackChoice(null)
+    setFeedbackComment("")
+    setFeedbackSent(false)
+    setResumedCreationId(null)
+    setResumedTitle("")
+    setChatError("")
+    setTextWorkspaceOpen(false)
+    window.history.replaceState({}, "", "/ai")
   }
 
   const renderConversation = (expanded = false) => (
@@ -1164,37 +1379,7 @@ export default function AiStudioPage() {
           <Button
             variant="outline"
             size="icon"
-            onClick={() => {
-              setTask("concept")
-              setMessages([])
-              setSelectedMaterials([])
-              setScopeFilter("all")
-              setMaterialSearch("")
-              setSelectedBrand("")
-              setSelectedCarModel("")
-              setMaterialsLoading(true)
-              const firstImageThread = createImageThread(1)
-              setImageThreads([firstImageThread])
-              setActiveImageThreadId(firstImageThread.id)
-              setUploadedReferenceImages([])
-              setGeneratingImageThreadId(null)
-              setWritingPlans([])
-              setActiveWritingPlanId(null)
-              setDraft(createEmptyDraft())
-              setWritingWorkspaceMode("chat")
-              setGeneratingDraft(false)
-              setExportingPackage(false)
-              setCopyNotice("")
-              setNoteTitle("")
-              setSavedCreation(null)
-              setFeedbackChoice(null)
-              setFeedbackComment("")
-              setFeedbackSent(false)
-              setResumedCreationId(null)
-              setResumedTitle("")
-              setChatError("")
-              window.history.replaceState({}, "", "/ai")
-            }}
+            onClick={handleResetWorkspace}
             aria-label="清空本轮创作"
             title="清空本轮创作"
           >
@@ -1479,10 +1664,13 @@ export default function AiStudioPage() {
 
             <section className="overflow-hidden rounded-lg border bg-card">
               <div className="border-b px-4 py-3">
-                <h2 className="flex items-center gap-2 text-sm font-semibold">
-                  <Save className="size-4 text-primary" />
-                  保存到我的创作
-                </h2>
+                <div className="flex items-center justify-between gap-3">
+                  <h2 className="flex items-center gap-2 text-sm font-semibold">
+                    <Save className="size-4 text-primary" />
+                    保存到我的创作
+                  </h2>
+                  {hasUnsavedChanges && <Badge variant="outline">未保存</Badge>}
+                </div>
               </div>
               <div className="space-y-3 p-4">
                 <Input

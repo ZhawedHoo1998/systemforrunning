@@ -23,6 +23,17 @@ export const GENERAL_CONTENT_TYPES = [
   "活动素材",
 ]
 
+export const TITLE_INSPIRATION_TYPES = [
+  "痛点型",
+  "钩子型",
+  "反差型",
+  "提问型",
+  "数字型",
+  "干货型",
+  "情绪型",
+  "场景型",
+] as const
+
 export const SOURCE_TYPE_LABELS: Record<string, string> = {
   self_experience: "自家经验",
   product资料: "产品资料",

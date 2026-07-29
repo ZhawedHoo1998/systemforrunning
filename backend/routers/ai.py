@@ -10,7 +10,7 @@ import aiofiles
 import httpx
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from sqlalchemy.orm import Session
 
 from backend.auth import get_current_user, require_admin
@@ -66,7 +66,7 @@ DEFAULT_SYSTEM_PROMPT = """你是 Ruby Rain 汽车香氛内容团队的中文创
 
 class ChatMessage(BaseModel):
     role: Literal["user", "assistant"]
-    content: str = Field(min_length=1, max_length=20000)
+    content: str = Field(max_length=20000)
 
 
 class ChatRequest(BaseModel):
@@ -74,7 +74,19 @@ class ChatRequest(BaseModel):
     brand: Optional[str] = Field(default=None, max_length=200)
     car_model: Optional[str] = Field(default=None, max_length=200)
     material_ids: list[str] = Field(default_factory=list, max_length=12)
-    messages: list[ChatMessage] = Field(min_length=1, max_length=30)
+    messages: list[ChatMessage] = Field(min_length=1, max_length=100)
+
+    @field_validator("messages")
+    @classmethod
+    def normalize_messages(cls, messages: list[ChatMessage]):
+        normalized = [
+            message.model_copy(update={"content": message.content.strip()})
+            for message in messages
+            if message.content.strip()
+        ]
+        if not normalized:
+            raise ValueError("At least one non-empty message is required")
+        return normalized[-30:]
 
 
 class FeedbackRequest(BaseModel):
@@ -282,6 +294,47 @@ def parse_json_output(output_text: str):
     return json.loads(cleaned[start:end + 1])
 
 
+def get_response_output_text(response) -> str:
+    status = str(getattr(response, "status", "") or "")
+    if status == "incomplete":
+        details = getattr(response, "incomplete_details", None)
+        reason = getattr(details, "reason", None) or "unknown"
+        raise ValueError(f"AI response incomplete: {reason}")
+
+    texts: list[str] = []
+    for output in getattr(response, "output", None) or []:
+        for part in getattr(output, "content", None) or []:
+            text = getattr(part, "text", None)
+            if isinstance(text, str) and text:
+                texts.append(text)
+            elif isinstance(getattr(text, "value", None), str):
+                texts.append(text.value)
+    output_text = "".join(texts).strip()
+
+    if not output_text:
+        try:
+            output_text = str(getattr(response, "output_text", "") or "").strip()
+        except (AttributeError, TypeError, ValueError):
+            output_text = ""
+    if not output_text:
+        raise ValueError("AI response did not contain output text")
+    return output_text
+
+
+def friendly_openai_error(error: Exception, action: str) -> str:
+    status_code = getattr(error, "status_code", None)
+    error_name = type(error).__name__.lower()
+    if status_code in {401, 403}:
+        return "AI API 鉴权失败，请检查后台 API Key 和中转站权限"
+    if status_code == 429:
+        return "AI API 当前额度不足或并发受限，请稍后重试"
+    if "timeout" in error_name:
+        return f"AI {action}等待超时，请稍后重试"
+    if isinstance(status_code, int) and status_code >= 500:
+        return f"AI 中转站暂时不可用，{action}未完成，请稍后重试"
+    return f"AI {action}失败，请检查模型配置、额度和网络"
+
+
 def normalize_writing_plan(payload: dict):
     titles = []
     for index, item in enumerate(payload.get("titles", [])[:12]):
@@ -435,27 +488,94 @@ async def chat(request: ChatRequest, db: Session = Depends(get_db)):
     )
 
     async def event_stream():
+        emitted_text = ""
+        terminal_message = ""
         try:
-            stream = await client.responses.create(
-                model=settings["text_model"],
-                instructions=instructions,
-                input=[message.model_dump() for message in request.messages],
-                max_output_tokens=settings["max_output_tokens"],
-                store=False,
-                stream=True,
-            )
-            async for event in stream:
-                if event.type == "response.output_text.delta":
-                    payload = json.dumps(
-                        {"type": "delta", "delta": event.delta},
-                        ensure_ascii=False,
+            for attempt_index in range(2):
+                try:
+                    stream = await client.responses.create(
+                        model=settings["text_model"],
+                        instructions=instructions,
+                        input=[message.model_dump() for message in request.messages],
+                        max_output_tokens=settings["max_output_tokens"],
+                        store=False,
+                        stream=True,
                     )
-                    yield f"data: {payload}\n\n"
+                    async for event in stream:
+                        if event.type == "response.output_text.delta":
+                            delta = getattr(event, "delta", None)
+                            if not isinstance(delta, str) or not delta:
+                                continue
+                            emitted_text += delta
+                            payload = json.dumps(
+                                {"type": "delta", "delta": delta},
+                                ensure_ascii=False,
+                            )
+                            yield f"data: {payload}\n\n"
+                        elif event.type == "response.completed" and not emitted_text:
+                            response = getattr(event, "response", None)
+                            try:
+                                completed_text = get_response_output_text(response)
+                            except (AttributeError, TypeError, ValueError):
+                                completed_text = ""
+                            if completed_text:
+                                emitted_text = completed_text
+                                payload = json.dumps(
+                                    {"type": "delta", "delta": completed_text},
+                                    ensure_ascii=False,
+                                )
+                                yield f"data: {payload}\n\n"
+                        elif event.type == "response.incomplete":
+                            response = getattr(event, "response", None)
+                            details = getattr(response, "incomplete_details", None)
+                            reason = getattr(details, "reason", None)
+                            terminal_message = (
+                                "模型输出达到长度上限，已保留当前内容，可继续让 AI 补写"
+                                if reason in {"max_tokens", "max_output_tokens"}
+                                else "模型本次生成未完整结束，请重试"
+                            )
+                        elif event.type in {"response.failed", "error"}:
+                            terminal_message = "AI 模型返回失败，请稍后重试"
+                    break
+                except json.JSONDecodeError:
+                    if emitted_text:
+                        logger.warning("AI relay stream ended with malformed SSE after partial output")
+                        terminal_message = "中转站流式响应提前中断，已保留当前内容，可继续让 AI 补写"
+                        break
+                    if attempt_index == 0:
+                        logger.warning(
+                            "AI relay returned malformed SSE; retrying chat stream",
+                            exc_info=True,
+                        )
+                        payload = json.dumps(
+                            {"type": "progress", "message": "流式响应异常，正在自动重试"},
+                            ensure_ascii=False,
+                        )
+                        yield f"data: {payload}\n\n"
+                        continue
+                    raise
+
+            if terminal_message and emitted_text:
+                payload = json.dumps(
+                    {"type": "warning", "message": terminal_message},
+                    ensure_ascii=False,
+                )
+                yield f"data: {payload}\n\n"
+            elif terminal_message:
+                payload = json.dumps(
+                    {"type": "error", "message": terminal_message},
+                    ensure_ascii=False,
+                )
+                yield f"data: {payload}\n\n"
+                return
+            elif not emitted_text:
+                yield 'data: {"type":"error","message":"模型没有返回正文，请重试或减少参考素材"}\n\n'
+                return
             yield 'data: {"type":"done"}\n\n'
-        except OpenAIError:
+        except (OpenAIError, AttributeError, TypeError, ValueError, json.JSONDecodeError) as error:
             logger.exception("OpenAI chat request failed")
             payload = json.dumps(
-                {"type": "error", "message": "OpenAI 对话请求失败，请检查模型、额度和网络"},
+                {"type": "error", "message": friendly_openai_error(error, "写作生成")},
                 ensure_ascii=False,
             )
             yield f"data: {payload}\n\n"
@@ -486,45 +606,114 @@ async def create_writing_plan(request: ChatRequest, db: Session = Depends(get_db
 你现在只负责整理可供写手选择的创作方案。标题之间必须有实质差异，内容方向需要具体到开头、语气和结构。
 不要直接写完整正文，不要编造素材中没有的产品参数、用户反馈或活动规则。"""
 
-    try:
+    plan_token_budget = min(max(settings["max_output_tokens"], 6000), 10000)
+
+    async def event_stream():
         try:
-            response = await client.responses.create(
-                model=settings["text_model"],
-                instructions=instructions,
-                input=[message.model_dump() for message in request.messages],
-                max_output_tokens=min(settings["max_output_tokens"], 7000),
-                text={
-                    "format": {
-                        "type": "json_schema",
-                        "name": "xiaohongshu_writing_plan",
-                        "schema": WRITING_PLAN_SCHEMA,
-                        "strict": True,
+            yield "data: " + json.dumps(
+                {"type": "progress", "message": "正在整理标题与内容方向"},
+                ensure_ascii=False,
+            ) + "\n\n"
+
+            for attempt_index in range(2):
+                try:
+                    request_instructions = instructions
+                    request_options = {
+                        "model": settings["text_model"],
+                        "instructions": request_instructions,
+                        "input": [message.model_dump() for message in request.messages],
+                        "max_output_tokens": plan_token_budget,
+                        "store": False,
+                        "stream": True,
                     }
-                },
-                store=False,
+                    if attempt_index == 0:
+                        request_options["text"] = {
+                            "format": {
+                                "type": "json_schema",
+                                "name": "xiaohongshu_writing_plan",
+                                "schema": WRITING_PLAN_SCHEMA,
+                                "strict": True,
+                            }
+                        }
+                    else:
+                        request_options["instructions"] = (
+                            request_instructions
+                            + "\n\n只输出一个 JSON 对象，不要使用 Markdown 代码块。必须严格符合以下 JSON Schema：\n"
+                            + json.dumps(WRITING_PLAN_SCHEMA, ensure_ascii=False)
+                        )
+
+                    stream = await client.responses.create(**request_options)
+                    output_parts: list[str] = []
+                    terminal_error = ""
+                    output_size = 0
+                    next_progress_size = 500
+
+                    async for event in stream:
+                        event_type = str(getattr(event, "type", "") or "")
+                        if event_type == "response.output_text.delta":
+                            delta = getattr(event, "delta", None)
+                            if isinstance(delta, str) and delta:
+                                output_parts.append(delta)
+                                output_size += len(delta)
+                                if output_size >= next_progress_size:
+                                    next_progress_size += 500
+                                    yield "data: " + json.dumps(
+                                        {"type": "progress", "message": "正在生成更多备选方案"},
+                                        ensure_ascii=False,
+                                    ) + "\n\n"
+                        elif event_type == "response.completed" and not output_parts:
+                            response = getattr(event, "response", None)
+                            output_parts.append(get_response_output_text(response))
+                        elif event_type == "response.incomplete":
+                            response = getattr(event, "response", None)
+                            details = getattr(response, "incomplete_details", None)
+                            reason = getattr(details, "reason", None) or "unknown"
+                            terminal_error = f"AI response incomplete: {reason}"
+                        elif event_type in {"response.failed", "error"}:
+                            terminal_error = "AI response failed"
+
+                    if terminal_error:
+                        raise ValueError(terminal_error)
+                    output_text = "".join(output_parts).strip()
+                    if not output_text:
+                        raise ValueError("AI response did not contain output text")
+                    plan = normalize_writing_plan(parse_json_output(output_text))
+                    yield "data: " + json.dumps(
+                        {"type": "plan", "plan": plan},
+                        ensure_ascii=False,
+                    ) + "\n\n"
+                    return
+                except (OpenAIError, ValueError, TypeError, json.JSONDecodeError):
+                    if attempt_index == 0:
+                        logger.warning(
+                            "Structured writing plan failed; retrying as plain JSON stream",
+                            exc_info=True,
+                        )
+                        yield "data: " + json.dumps(
+                            {"type": "progress", "message": "正在切换兼容模式继续生成"},
+                            ensure_ascii=False,
+                        ) + "\n\n"
+                        continue
+                    raise
+        except (OpenAIError, ValueError, TypeError, json.JSONDecodeError) as error:
+            logger.exception("OpenAI writing plan request failed")
+            detail = (
+                friendly_openai_error(error, "创作方案生成")
+                if isinstance(error, OpenAIError)
+                else "模型没有返回完整的创作方案，请重试或减少参考素材"
             )
-        except OpenAIError:
-            logger.warning("Structured output unsupported; retrying writing plan as JSON")
-            response = await client.responses.create(
-                model=settings["text_model"],
-                instructions=(
-                    instructions
-                    + "\n\n只输出一个 JSON 对象，不要使用 Markdown 代码块。必须严格符合以下 JSON Schema：\n"
-                    + json.dumps(WRITING_PLAN_SCHEMA, ensure_ascii=False)
-                ),
-                input=[message.model_dump() for message in request.messages],
-                max_output_tokens=min(settings["max_output_tokens"], 7000),
-                store=False,
-            )
-        return normalize_writing_plan(parse_json_output(response.output_text))
-    except (OpenAIError, ValueError, TypeError, json.JSONDecodeError) as error:
-        logger.exception("OpenAI writing plan request failed")
-        raise HTTPException(
-            status_code=502,
-            detail="AI 创作方案整理失败，请重试或检查文本模型配置",
-        ) from error
-    finally:
-        await client.close()
+            yield "data: " + json.dumps(
+                {"type": "error", "message": detail},
+                ensure_ascii=False,
+            ) + "\n\n"
+        finally:
+            await client.close()
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
 
 
 async def read_reference_upload(reference_image: UploadFile):

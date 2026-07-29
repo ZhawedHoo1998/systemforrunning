@@ -4,11 +4,18 @@ import { useState } from "react"
 import Image from "next/image"
 import { AlertCircle, CarFront, CheckCircle2, Download, FileText, ImageIcon, Lightbulb, LoaderCircle, MessageCircle, Video, X, ChevronRight, ChevronLeft, Upload, Plus, Trash2 } from "lucide-react"
 import { importXiaohongshuMaterial, type Material, type MaterialScope, type MaterialSourceMetadata } from "@/lib/api"
-import { GENERAL_CONTENT_TYPES, isImageAttachment, isVideoAttachment, VEHICLE_CONTENT_TYPES } from "@/lib/materials"
+import {
+  GENERAL_CONTENT_TYPES,
+  isImageAttachment,
+  isVideoAttachment,
+  TITLE_INSPIRATION_TYPES,
+  VEHICLE_CONTENT_TYPES,
+} from "@/lib/materials"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { Badge } from "@/components/ui/badge"
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { Textarea } from "@/components/ui/textarea"
 import { cn } from "@/lib/utils"
 
@@ -95,15 +102,28 @@ export function AddMaterialModal({
     ...availableContentTypes,
     ...contentTypes.filter((type) => !availableContentTypes.includes(type)),
   ]
+  const selectedTitleType = TITLE_INSPIRATION_TYPES.find((type) => tags.includes(type))
 
   const handleClose = () => {
     onClose()
   }
 
   const handleContentTypeToggle = (type: string) => {
+    if (type === "标题灵感" && contentTypes.includes(type)) {
+      setTags((current) => current.filter(
+        (tag) => !TITLE_INSPIRATION_TYPES.some((titleType) => titleType === tag)
+      ))
+    }
     setContentTypes((prev) =>
       prev.includes(type) ? prev.filter((t) => t !== type) : [...prev, type]
     )
+  }
+
+  const handleTitleTypeChange = (type: string) => {
+    setTags((current) => [
+      ...current.filter((tag) => !TITLE_INSPIRATION_TYPES.some((titleType) => titleType === tag)),
+      type,
+    ])
   }
 
   const handleScopeChange = (scope: MaterialScope) => {
@@ -491,6 +511,22 @@ export function AddMaterialModal({
                   ))}
                 </div>
               </div>
+
+              {contentTypes.includes("标题灵感") && (
+                <div>
+                  <Label className="mb-2 block">标题类型</Label>
+                  <Select value={selectedTitleType} onValueChange={handleTitleTypeChange}>
+                    <SelectTrigger aria-label="选择标题类型">
+                      <SelectValue placeholder="选择标题结构" />
+                    </SelectTrigger>
+                    <SelectContent className="z-[80]">
+                      {TITLE_INSPIRATION_TYPES.map((type) => (
+                        <SelectItem key={type} value={type}>{type}</SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+              )}
 
               <div>
                 <Label className="mb-2 block">标签</Label>

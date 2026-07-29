@@ -351,6 +351,21 @@ export interface AiChatRequest {
   messages: AiMessage[]
 }
 
+function normalizeAiChatRequest(payload: AiChatRequest): AiChatRequest {
+  const messages = payload.messages
+    .map((message) => ({ ...message, content: message.content.trim().slice(0, 20000) }))
+    .filter((message) => message.content.length > 0)
+    .slice(-30)
+
+  return {
+    ...payload,
+    brand: payload.brand?.trim().slice(0, 200),
+    car_model: payload.car_model?.trim().slice(0, 200),
+    material_ids: payload.material_ids.slice(0, 12),
+    messages,
+  }
+}
+
 export interface AiImageRequest {
   prompt: string
   reference_images: File[]
@@ -560,11 +575,12 @@ export async function getAiStatus(): Promise<AiStatus> {
 export async function streamAiChat(
   payload: AiChatRequest,
   onDelta: (delta: string) => void,
+  onWarning?: (message: string) => void,
 ): Promise<void> {
   const res = await apiFetch(`${API_BASE}/api/ai/chat`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload),
+    body: JSON.stringify(normalizeAiChatRequest(payload)),
   })
   if (!res.ok) await throwApiError(res, "AI 对话请求失败")
   if (!res.body) throw new Error("浏览器不支持流式响应")
@@ -584,11 +600,12 @@ export async function streamAiChat(
       const dataLine = event.split("\n").find((line) => line.startsWith("data: "))
       if (!dataLine) continue
       const data = JSON.parse(dataLine.slice(6)) as {
-        type: "delta" | "done" | "error"
+        type: "delta" | "done" | "progress" | "warning" | "error"
         delta?: string
         message?: string
       }
       if (data.type === "delta" && data.delta) onDelta(data.delta)
+      if (data.type === "warning") onWarning?.(data.message || "本次生成未完整结束")
       if (data.type === "error") throw new Error(data.message || "AI 对话请求失败")
     }
   }
@@ -598,10 +615,37 @@ export async function generateAiWritingPlan(payload: AiChatRequest): Promise<AiW
   const res = await apiFetch(`${API_BASE}/api/ai/writing-plan`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload),
+    body: JSON.stringify(normalizeAiChatRequest(payload)),
   })
   if (!res.ok) await throwApiError(res, "AI 创作方案整理失败")
-  return res.json()
+  if (!res.body) throw new Error("浏览器不支持流式响应")
+
+  const reader = res.body.getReader()
+  const decoder = new TextDecoder()
+  let buffer = ""
+  let completedPlan: AiWritingPlan | null = null
+
+  while (true) {
+    const { done, value } = await reader.read()
+    if (done) break
+    buffer += decoder.decode(value, { stream: true })
+    const events = buffer.split("\n\n")
+    buffer = events.pop() || ""
+    for (const event of events) {
+      const dataLine = event.split("\n").find((line) => line.startsWith("data: "))
+      if (!dataLine) continue
+      const data = JSON.parse(dataLine.slice(6)) as {
+        type: "progress" | "plan" | "error"
+        message?: string
+        plan?: AiWritingPlan
+      }
+      if (data.type === "plan" && data.plan) completedPlan = data.plan
+      if (data.type === "error") throw new Error(data.message || "AI 创作方案整理失败")
+    }
+  }
+
+  if (!completedPlan) throw new Error("AI 没有返回可用的创作方案")
+  return completedPlan
 }
 
 export async function generateAiImage(payload: AiImageRequest): Promise<AiImageResult> {
