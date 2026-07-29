@@ -2,7 +2,7 @@
 
 import { FormEvent, useState } from "react"
 import Link from "next/link"
-import { AlertCircle, AtSign, KeyRound, LoaderCircle, LogOut, ShieldCheck, Users } from "lucide-react"
+import { AlertCircle, KeyRound, LoaderCircle, LogOut, ShieldCheck, Users } from "lucide-react"
 import { useAuth } from "@/components/AuthProvider"
 import { Header } from "@/components/Header"
 import { Button } from "@/components/ui/button"
@@ -83,14 +83,6 @@ export default function AccountPage() {
                     </Link>
                   </Button>
                 </>
-              )}
-              {(user?.role === "admin" || user?.role === "manager") && (
-                <Button asChild variant="outline">
-                  <Link href="/creator-accounts">
-                    <AtSign />
-                    创作账号管理
-                  </Link>
-                </Button>
               )}
               <Button type="button" variant="outline" onClick={() => void signOut()}>
                 <LogOut />

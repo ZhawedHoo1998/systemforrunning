@@ -3,7 +3,7 @@
 import { useEffect, useState } from "react"
 import Link from "next/link"
 import { usePathname } from "next/navigation"
-import { CarFront, ClipboardCheck, Clock3, FileText, Heart, Lightbulb, Plus, Search, Sparkles, UserRound } from "lucide-react"
+import { BarChart3, CarFront, ClipboardCheck, Clock3, FileText, Heart, Lightbulb, Plus, Search, Sparkles, UserRound } from "lucide-react"
 import { useAuth } from "@/components/AuthProvider"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
@@ -21,6 +21,7 @@ const navigation = [
   { href: "/", label: "车型素材", icon: CarFront },
   { href: "/inspiration", label: "灵感中心", icon: Lightbulb },
   { href: "/ai", label: "AI 创作", icon: Sparkles },
+  { href: "/creator-accounts", label: "账号情报", icon: BarChart3 },
   { href: "/tasks", label: "任务", icon: ClipboardCheck },
   { href: "/creations", label: "我的创作", icon: FileText },
   { href: "/favorites", label: "我的收藏", icon: Heart },

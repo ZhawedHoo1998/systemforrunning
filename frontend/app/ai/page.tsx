@@ -256,7 +256,7 @@ export default function AiStudioPage() {
 
   useEffect(() => {
     let active = true
-    Promise.all([getAiStatus(), getOptions(), getCreatorAccounts(true)])
+    Promise.all([getAiStatus(), getOptions(), getCreatorAccounts(true, "owned")])
       .then(([statusResult, optionsResult, accountResults]) => {
         if (!active) return
         setStatus(statusResult)

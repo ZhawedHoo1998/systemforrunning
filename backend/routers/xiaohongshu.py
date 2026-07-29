@@ -133,11 +133,20 @@ def _friendly_cli_error(message: str) -> str:
     return f"小红书内容获取失败：{message or '未知错误'}"
 
 
-async def run_xhs_command(command: str, url: str, timeout_seconds: int) -> dict[str, Any]:
+async def run_xhs_command(
+    command: str,
+    target: str,
+    timeout_seconds: int,
+    *,
+    extra_args: list[str] | None = None,
+) -> dict[str, Any]:
     cli_path = _get_cli_path()
-    args = [cli_path, command, url]
+    args = [cli_path, command]
+    if target:
+        args.append(target)
     if command == "comments":
         args.append("--all")
+    args.extend(extra_args or [])
     args.append("--json")
 
     env = os.environ.copy()

@@ -85,3 +85,12 @@ def require_manager(user: User = Depends(get_current_user)) -> User:
             detail="仅管理员或运营管理可以执行此操作",
         )
     return user
+
+
+def require_account_query_operator(user: User = Depends(get_current_user)) -> User:
+    if user.role not in {"admin", "writer"}:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="仅管理员或写手可以发起账号数据查询",
+        )
+    return user

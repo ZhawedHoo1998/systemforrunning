@@ -49,6 +49,13 @@ cd frontend
 npm run dev
 ```
 
+### 发布到公网预览
+
+- 固定预览地址：`https://6fabc4ff.r6.cpolar.cn/`
+- cpolar 的 `ruby-rain` 隧道固定转发 `127.0.0.1:3000`
+- 前端改动完成后必须执行 `npm run build`，停止旧的 3000 端口进程，并用最新构建在 3000 端口重新启动生产服务
+- 交付前同时验证本地 `http://127.0.0.1:3000/`、公网预览地址和公网 `/api/health`；不要只把最新版运行在 3001 等临时端口
+
 ### 启动 PostgreSQL
 ```bash
 docker-compose up -d
@@ -59,4 +66,5 @@ docker-compose up -d
 1. 前端使用 Next.js 15 App Router，所有组件默认是 Server Components。"use client" 声明的才是客户端组件
 2. shadcn/ui 组件使用 Radix UI primitives
 3. Tailwind CSS v4 使用新的 CSS-first 配置方式
-4. API 基础 URL 通过 `NEXT_PUBLIC_API_URL` 环境变量配置，默认为 `http://localhost:8000`
+4. 浏览器端 API 默认使用同源 `/api`，由 Next.js rewrite 转发到 `BACKEND_INTERNAL_URL`（默认 `http://127.0.0.1:8000`）
+5. TikHub 等真实 API Key 只能放在被 Git 忽略的根目录 `.env`，`.env.example` 只保留空占位

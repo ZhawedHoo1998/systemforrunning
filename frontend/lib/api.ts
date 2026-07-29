@@ -350,8 +350,71 @@ export interface CreatorAccountSampleNote {
   comment_count: number
   collected_count: number
   share_count: number
+  engagement_score?: number
+  save_like_ratio?: number
   tags: string[]
   published_at: string | null
+}
+
+export interface CreatorMonitoringNote {
+  id: string
+  title: string
+  source_url: string
+  published_at: string
+  liked_count: number
+  collected_count: number
+  comment_count: number
+  share_count: number
+  interactions: number
+  delta: {
+    liked_count: number
+    collected_count: number
+    comment_count: number
+    share_count: number
+    interactions: number
+  }
+  is_high_performing: boolean
+  should_alert: boolean
+}
+
+export interface CreatorMonitoringAnalysis {
+  version: number
+  window_days: number
+  window_start: string
+  window_end: string
+  last_run_at: string
+  data_source: "cli" | "tikhub" | null
+  pages_fetched: number
+  notes_checked: number
+  coverage_complete: boolean
+  post_count: number
+  followers: number
+  follower_delta: number
+  totals: {
+    liked_count: number
+    collected_count: number
+    comment_count: number
+    share_count: number
+    interactions: number
+  }
+  deltas: {
+    liked_count: number
+    collected_count: number
+    comment_count: number
+    share_count: number
+    interactions: number
+  }
+  averages: {
+    liked_count: number
+    collected_count: number
+    comment_count: number
+    share_count: number
+    interactions: number
+  }
+  high_performing_count: number
+  high_performing_notes: CreatorMonitoringNote[]
+  top_notes: CreatorMonitoringNote[]
+  generated_alert_count: number
 }
 
 export interface CreatorAccountAnalysis {
@@ -362,7 +425,18 @@ export interface CreatorAccountAnalysis {
   average_body_length?: number
   average_paragraphs?: number
   average_likes?: number
+  average_collections?: number
   average_comments?: number
+  average_shares?: number
+  average_save_like_ratio?: number
+  data_source?: "cli" | "tikhub"
+  pages_fetched?: number
+  synced_note_count?: number
+  public_note_count?: number
+  last_sync_new_or_updated?: number
+  data_scope?: "public"
+  has_more?: boolean
+  page_limit_reached?: boolean
   positioning_summary?: string
   style_summary?: string
   hook_patterns?: Array<{ name: string; count: number; ratio: number }>
@@ -373,19 +447,28 @@ export interface CreatorAccountAnalysis {
     liked_count: number
     comment_count: number
     collected_count: number
+    share_count?: number
   }>
   profile_metrics?: {
     followers?: number
     following?: number
     total_engagement?: number
+    note_count?: number
   }
   warnings?: string[]
+  monitoring_7d?: CreatorMonitoringAnalysis
 }
 
 export interface CreatorAccount {
   id: string
   name: string
   xhs_user_id: string
+  account_kind: "owned" | "competitor"
+  data_source: "auto" | "cli" | "tikhub"
+  last_sync_source: "cli" | "tikhub" | null
+  last_sync_status: "never" | "success" | "failed"
+  last_sync_error: string | null
+  synced_note_count: number
   red_id: string | null
   nickname: string | null
   avatar_url: string | null
@@ -412,6 +495,8 @@ export interface CreatorAccount {
 export interface CreatorAccountPayload {
   name: string
   xhs_user_id: string
+  account_kind: CreatorAccount["account_kind"]
+  data_source: CreatorAccount["data_source"]
   positioning?: string
   target_audience?: string
   tone_style?: string
@@ -423,8 +508,13 @@ export interface CreatorAccountPayload {
   is_active: boolean
 }
 
-export async function getCreatorAccounts(activeOnly = false): Promise<CreatorAccount[]> {
-  const res = await apiFetch(`${API_BASE}/api/creator-accounts?active_only=${activeOnly}`)
+export async function getCreatorAccounts(
+  activeOnly = false,
+  accountKind?: CreatorAccount["account_kind"],
+): Promise<CreatorAccount[]> {
+  const sp = new URLSearchParams({ active_only: String(activeOnly) })
+  if (accountKind) sp.set("account_kind", accountKind)
+  const res = await apiFetch(`${API_BASE}/api/creator-accounts?${sp.toString()}`)
   if (!res.ok) await throwApiError(res, "创作账号加载失败")
   return res.json()
 }
@@ -452,10 +542,181 @@ export async function updateCreatorAccount(
   return res.json()
 }
 
-export async function analyzeCreatorAccount(id: string): Promise<CreatorAccount> {
-  const res = await apiFetch(`${API_BASE}/api/creator-accounts/${id}/analyze`, { method: "POST" })
+export async function analyzeCreatorAccount(
+  id: string,
+  options: { source?: CreatorAccount["data_source"]; max_pages?: number } = {},
+): Promise<CreatorAccount> {
+  const sp = new URLSearchParams()
+  if (options.source) sp.set("source", options.source)
+  if (options.max_pages) sp.set("max_pages", String(options.max_pages))
+  const suffix = sp.size ? `?${sp.toString()}` : ""
+  const res = await apiFetch(`${API_BASE}/api/creator-accounts/${id}/analyze${suffix}`, { method: "POST" })
   if (!res.ok) await throwApiError(res, "账号数据同步与分析失败")
   return res.json()
+}
+
+export interface CreatorAccountNotesResponse {
+  items: CreatorAccountSampleNote[]
+  total: number
+  page: number
+  page_size: number
+}
+
+export interface XhsPublicDataStatus {
+  cli_installed: boolean
+  cli_path: string | null
+  cli_authenticated: boolean
+  cli_user: { id: string; name: string; red_id: string } | null
+  tikhub_configured: boolean
+  default_source: CreatorAccount["data_source"]
+  default_max_pages: number
+  public_data_scope: boolean
+  private_analytics_configured: boolean
+  daily_monitor: {
+    enabled: boolean
+    timezone: string
+    hour: number
+    time_label: string
+    max_pages: number
+    source: CreatorAccount["data_source"]
+    strategy: "tikhub_metrics_cli_fallback" | "cli_only" | "tikhub_only"
+    window_days: number
+    detail_notes: number
+    next_run_at: string
+  }
+}
+
+export async function getXhsPublicDataStatus(): Promise<XhsPublicDataStatus> {
+  const res = await apiFetch(`${API_BASE}/api/creator-accounts/status/public-data`)
+  if (!res.ok) await throwApiError(res, "小红书公开数据源状态加载失败")
+  return res.json()
+}
+
+export async function getCreatorAccountNotes(
+  id: string,
+  params: {
+    sort?: "published_at" | "engagement" | "likes" | "collections" | "comments"
+    order?: "asc" | "desc"
+    page?: number
+    page_size?: number
+  } = {},
+): Promise<CreatorAccountNotesResponse> {
+  const sp = new URLSearchParams()
+  if (params.sort) sp.set("sort", params.sort)
+  if (params.order) sp.set("order", params.order)
+  if (params.page) sp.set("page", String(params.page))
+  if (params.page_size) sp.set("page_size", String(params.page_size))
+  const res = await apiFetch(`${API_BASE}/api/creator-accounts/${id}/notes?${sp.toString()}`)
+  if (!res.ok) await throwApiError(res, "账号笔记加载失败")
+  return res.json()
+}
+
+export interface CreatorDiscoveryCandidate {
+  user_id: string
+  red_id: string
+  nickname: string
+  avatar_url: string
+  keywords: string[]
+  matched_notes: number
+  total_likes: number
+  total_collections: number
+  total_comments: number
+  score: number
+  sample_notes: Array<{
+    id: string
+    title: string
+    liked_count: number
+    collected_count: number
+  }>
+}
+
+export interface CreatorDiscoveryResult {
+  source: "cli" | "tikhub"
+  keywords: string[]
+  candidates: CreatorDiscoveryCandidate[]
+  warnings: string[]
+}
+
+export async function discoverCreatorAccounts(payload: {
+  keywords: string[]
+  source: CreatorAccount["data_source"]
+  pages_per_keyword: number
+}): Promise<CreatorDiscoveryResult> {
+  const res = await apiFetch(`${API_BASE}/api/creator-accounts/discover`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  })
+  if (!res.ok) await throwApiError(res, "对标账号发现失败")
+  return res.json()
+}
+
+export interface AccountMonitorRun {
+  id: string
+  account_id: string
+  monitor_date: string
+  status: "running" | "success" | "failed"
+  data_source: "cli" | "tikhub" | null
+  pages_fetched: number
+  notes_checked: number
+  analysis: CreatorMonitoringAnalysis | Record<string, never>
+  error: string | null
+  started_at: string | null
+  completed_at: string | null
+}
+
+export interface AccountMonitoringStatus {
+  schedule: XhsPublicDataStatus["daily_monitor"]
+  accounts: Array<{
+    account_id: string
+    account_name: string
+    latest_run: AccountMonitorRun | null
+  }>
+}
+
+export async function getAccountMonitoringStatus(): Promise<AccountMonitoringStatus> {
+  const res = await apiFetch(`${API_BASE}/api/account-monitoring/status`)
+  if (!res.ok) await throwApiError(res, "账号每日监测状态加载失败")
+  return res.json()
+}
+
+export async function runAccountMonitoring(accountId: string): Promise<AccountMonitorRun> {
+  const res = await apiFetch(`${API_BASE}/api/account-monitoring/run/${accountId}`, { method: "POST" })
+  if (!res.ok) await throwApiError(res, "账号每日监测执行失败")
+  return res.json()
+}
+
+export interface CreatorPerformanceAlert {
+  id: string
+  account_id: string
+  account_name: string
+  note_id: string
+  title: string
+  message: string
+  source_url: string | null
+  metrics: CreatorMonitoringNote
+  created_at: string
+}
+
+export interface CreatorPerformanceAlertsResponse {
+  count: number
+  items: CreatorPerformanceAlert[]
+}
+
+export async function getCreatorPerformanceAlerts(): Promise<CreatorPerformanceAlertsResponse> {
+  const res = await apiFetch(`${API_BASE}/api/account-monitoring/alerts`)
+  if (!res.ok) await throwApiError(res, "账号表现提醒加载失败")
+  return res.json()
+}
+
+export async function markCreatorPerformanceAlertsSeen(alertIds: string[]): Promise<void> {
+  if (alertIds.length === 0) return
+  const res = await apiFetch(`${API_BASE}/api/account-monitoring/alerts/seen`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ alert_ids: alertIds }),
+  })
+  if (!res.ok) await throwApiError(res, "账号表现提醒确认失败")
 }
 
 export interface Material {

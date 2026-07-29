@@ -1,4 +1,6 @@
+import asyncio
 import os
+from contextlib import asynccontextmanager
 
 from dotenv import load_dotenv
 from fastapi import FastAPI
@@ -18,7 +20,8 @@ from backend.database import (
     migrate_creator_account_intelligence,
     migrate_multi_user_data,
 )
-from backend.routers import ai, creations, creator_accounts, materials, tasks, uploads, users, xiaohongshu, xiaohongshu_shop
+from backend.account_monitor import account_monitor_scheduler
+from backend.routers import account_monitoring, ai, creations, creator_accounts, materials, tasks, uploads, users, xiaohongshu, xiaohongshu_shop
 
 Base.metadata.create_all(bind=engine)
 migrate_material_scope()
@@ -29,12 +32,26 @@ migrate_multi_user_data()
 migrate_ai_materials_to_creations()
 
 api_docs_enabled = os.getenv("API_DOCS_ENABLED", "true").lower() == "true"
+
+
+@asynccontextmanager
+async def lifespan(_: FastAPI):
+    stop_event = asyncio.Event()
+    monitor_task = asyncio.create_task(account_monitor_scheduler(stop_event))
+    try:
+        yield
+    finally:
+        stop_event.set()
+        await monitor_task
+
+
 app = FastAPI(
     title="Ruby Rain 香氛素材库 API",
     version="1.0.0",
     docs_url="/docs" if api_docs_enabled else None,
     redoc_url="/redoc" if api_docs_enabled else None,
     openapi_url="/openapi.json" if api_docs_enabled else None,
+    lifespan=lifespan,
 )
 
 frontend_origins = [
@@ -60,6 +77,7 @@ app.include_router(xiaohongshu.router)
 app.include_router(xiaohongshu_shop.router)
 app.include_router(creations.router)
 app.include_router(creator_accounts.router)
+app.include_router(account_monitoring.router)
 app.include_router(tasks.router)
 app.include_router(ai.router)
 app.include_router(users.auth_router)

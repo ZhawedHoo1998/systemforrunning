@@ -1,22 +1,34 @@
 import re
 from collections import Counter
 from datetime import datetime
-from typing import Any, Optional
-from urllib.parse import quote, urlparse
+from typing import Any, Literal, Optional
+from urllib.parse import urlparse
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field, field_validator
 from sqlalchemy.orm import Session
 
-from backend.auth import get_current_user, require_manager
+from backend.auth import get_current_user, require_account_query_operator, require_manager
 from backend.database import get_db
-from backend.models import CreatorAccount, User
-from backend.routers.xiaohongshu import run_xhs_command
+from backend.models import (
+    CreatorAccount,
+    CreatorAccountNote,
+    CreatorAccountNoteSnapshot,
+    CreatorAccountSnapshot,
+    User,
+)
+from backend.xhs_public_data import (
+    discover_public_accounts,
+    public_source_status,
+    sync_public_account,
+)
 
 
 router = APIRouter(prefix="/api/creator-accounts", tags=["creator-accounts"])
 
-MAX_PROFILE_NOTES = 8
+MAX_PROFILE_NOTES = 12
+AccountKind = Literal["owned", "competitor"]
+DataSource = Literal["auto", "cli", "tikhub"]
 
 
 def _normalize_xhs_user_id(value: str) -> str:
@@ -48,6 +60,8 @@ def _clean_list(values: list[str]) -> list[str]:
 class CreatorAccountCreateRequest(BaseModel):
     name: str = Field(min_length=1, max_length=200)
     xhs_user_id: str = Field(min_length=1, max_length=1000)
+    account_kind: AccountKind = "owned"
+    data_source: DataSource = "auto"
     positioning: Optional[str] = Field(default=None, max_length=5000)
     target_audience: Optional[str] = Field(default=None, max_length=5000)
     tone_style: Optional[str] = Field(default=None, max_length=5000)
@@ -72,6 +86,8 @@ class CreatorAccountCreateRequest(BaseModel):
 class CreatorAccountUpdateRequest(BaseModel):
     name: Optional[str] = Field(default=None, min_length=1, max_length=200)
     xhs_user_id: Optional[str] = Field(default=None, min_length=1, max_length=1000)
+    account_kind: Optional[AccountKind] = None
+    data_source: Optional[DataSource] = None
     positioning: Optional[str] = Field(default=None, max_length=5000)
     target_audience: Optional[str] = Field(default=None, max_length=5000)
     tone_style: Optional[str] = Field(default=None, max_length=5000)
@@ -93,11 +109,33 @@ class CreatorAccountUpdateRequest(BaseModel):
         return _clean_list(values) if values is not None else values
 
 
+class CreatorDiscoveryRequest(BaseModel):
+    keywords: list[str] = Field(min_length=1, max_length=20)
+    source: DataSource = "auto"
+    pages_per_keyword: int = Field(default=1, ge=1, le=3)
+
+    @field_validator("keywords")
+    @classmethod
+    def normalize_keywords(cls, values: list[str]):
+        normalized = list(dict.fromkeys(
+            value.strip()[:50] for value in values if value.strip()
+        ))
+        if not normalized:
+            raise ValueError("至少需要一个搜索关键词")
+        return normalized
+
+
 def creator_account_to_dict(account: CreatorAccount) -> dict[str, Any]:
     return {
         "id": account.id,
         "name": account.name,
         "xhs_user_id": account.xhs_user_id,
+        "account_kind": account.account_kind or "owned",
+        "data_source": account.data_source or "auto",
+        "last_sync_source": account.last_sync_source,
+        "last_sync_status": account.last_sync_status or "never",
+        "last_sync_error": account.last_sync_error,
+        "synced_note_count": account.synced_note_count or 0,
         "red_id": account.red_id,
         "nickname": account.nickname,
         "avatar_url": account.avatar_url,
@@ -119,159 +157,6 @@ def creator_account_to_dict(account: CreatorAccount) -> dict[str, Any]:
         "last_analyzed_at": account.last_analyzed_at.isoformat() if account.last_analyzed_at else None,
         "created_at": account.created_at.isoformat() if account.created_at else None,
         "updated_at": account.updated_at.isoformat() if account.updated_at else None,
-    }
-
-
-def _number(value: Any) -> int:
-    if isinstance(value, bool):
-        return int(value)
-    if isinstance(value, (int, float)):
-        return int(value)
-    if not isinstance(value, str):
-        return 0
-    normalized = value.strip().replace(",", "")
-    multiplier = 1
-    if normalized.endswith("万"):
-        normalized = normalized[:-1]
-        multiplier = 10_000
-    elif normalized.endswith("亿"):
-        normalized = normalized[:-1]
-        multiplier = 100_000_000
-    try:
-        return int(float(normalized) * multiplier)
-    except ValueError:
-        return 0
-
-
-def _first_image_url(cover: Any) -> str:
-    if not isinstance(cover, dict):
-        return ""
-    for key in ("url_default", "url_pre", "url"):
-        value = cover.get(key)
-        if isinstance(value, str) and value:
-            return value.replace("http://", "https://", 1)
-    for item in cover.get("info_list") or []:
-        if isinstance(item, dict) and isinstance(item.get("url"), str) and item["url"]:
-            return item["url"].replace("http://", "https://", 1)
-    return ""
-
-
-def _profile_summary(profile_data: dict[str, Any], resolved_user_id: str) -> dict[str, Any]:
-    basic = profile_data.get("basic_info") if isinstance(profile_data.get("basic_info"), dict) else {}
-    interactions = profile_data.get("interactions") if isinstance(profile_data.get("interactions"), list) else []
-    interaction_counts = {
-        str(item.get("type") or item.get("name") or ""): _number(item.get("count"))
-        for item in interactions
-        if isinstance(item, dict)
-    }
-    return {
-        "user_id": resolved_user_id,
-        "nickname": str(basic.get("nickname") or "").strip(),
-        "red_id": str(basic.get("red_id") or "").strip(),
-        "bio": str(basic.get("desc") or "").strip(),
-        "ip_location": str(basic.get("ip_location") or "").strip(),
-        "avatar_url": str(basic.get("imageb") or basic.get("images") or "").strip(),
-        "followers": interaction_counts.get("fans", 0),
-        "following": interaction_counts.get("follows", 0),
-        "total_engagement": interaction_counts.get("interaction", 0),
-    }
-
-
-async def _resolve_xhs_user_id(value: str) -> str:
-    if re.fullmatch(r"[0-9a-fA-F]{24}", value):
-        return value
-
-    search_data = await run_xhs_command("search-user", value, timeout_seconds=45)
-    results = search_data.get("user_info_dtos")
-    if not isinstance(results, list):
-        results = []
-    candidates = []
-    for result in results:
-        if not isinstance(result, dict):
-            continue
-        user = result.get("user_base_dto")
-        if not isinstance(user, dict):
-            continue
-        user_id = str(user.get("user_id") or "").strip()
-        red_id = str(user.get("red_id") or "").strip()
-        nickname = str(user.get("user_nickname") or "").strip()
-        if user_id:
-            candidates.append({"user_id": user_id, "red_id": red_id, "nickname": nickname})
-
-    exact = [
-        candidate for candidate in candidates
-        if candidate["red_id"] == value or candidate["nickname"].casefold() == value.casefold()
-    ]
-    if len(exact) == 1:
-        return exact[0]["user_id"]
-    if not exact:
-        raise HTTPException(
-            status_code=422,
-            detail="没有找到对应的小红书账号，请填写准确的小红书号或账号主页链接",
-        )
-    raise HTTPException(
-        status_code=422,
-        detail="搜索到多个同名账号，请改用账号主页链接",
-    )
-
-
-def _note_card(note_data: dict[str, Any]) -> dict[str, Any]:
-    items = note_data.get("items") if isinstance(note_data.get("items"), list) else []
-    for item in items:
-        if not isinstance(item, dict):
-            continue
-        card = item.get("note_card")
-        if isinstance(card, dict):
-            return card
-    return {}
-
-
-def _note_from_listing(item: dict[str, Any]) -> dict[str, Any]:
-    interactions = item.get("interact_info") if isinstance(item.get("interact_info"), dict) else {}
-    corner = item.get("corner") if isinstance(item.get("corner"), dict) else {}
-    return {
-        "id": str(item.get("note_id") or item.get("id") or "").strip(),
-        "title": str(item.get("display_title") or item.get("title") or "").strip(),
-        "content": "",
-        "cover_url": _first_image_url(item.get("cover")),
-        "note_type": str(item.get("type") or "normal"),
-        "is_private": str(corner.get("type") or "").lower() == "private",
-        "liked_count": _number(interactions.get("liked_count")),
-        "comment_count": _number(interactions.get("comment_count")),
-        "collected_count": _number(interactions.get("collected_count")),
-        "share_count": _number(interactions.get("share_count")),
-        "tags": [],
-        "published_at": None,
-        "xsec_token": str(item.get("xsec_token") or "").strip(),
-    }
-
-
-def _merge_note_detail(note: dict[str, Any], card: dict[str, Any]) -> dict[str, Any]:
-    interactions = card.get("interact_info") if isinstance(card.get("interact_info"), dict) else {}
-    timestamp = card.get("time")
-    published_at = None
-    if isinstance(timestamp, (int, float)) and timestamp > 0:
-        try:
-            published_at = datetime.utcfromtimestamp(timestamp / 1000).isoformat()
-        except (OverflowError, OSError, ValueError):
-            published_at = None
-    tags = [
-        str(tag.get("name") or "").strip()
-        for tag in card.get("tag_list") or []
-        if isinstance(tag, dict) and str(tag.get("name") or "").strip()
-    ]
-    return {
-        **note,
-        "title": str(card.get("title") or note["title"]).strip(),
-        "content": str(card.get("desc") or "").strip()[:12000],
-        "cover_url": _first_image_url((card.get("image_list") or [{}])[0]) or note["cover_url"],
-        "note_type": str(card.get("type") or note["note_type"]),
-        "liked_count": _number(interactions.get("liked_count")) or note["liked_count"],
-        "comment_count": _number(interactions.get("comment_count")),
-        "collected_count": _number(interactions.get("collected_count")),
-        "share_count": _number(interactions.get("share_count")),
-        "tags": list(dict.fromkeys(tags)),
-        "published_at": published_at,
     }
 
 
@@ -330,9 +215,15 @@ def build_basic_analysis(notes: list[dict[str, Any]], profile: dict[str, Any], w
     top_topics = [{"name": name, "count": count} for name, count in topics.most_common(8)]
     top_notes = sorted(
         usable,
-        key=lambda note: note.get("liked_count", 0) + note.get("comment_count", 0) * 2 + note.get("collected_count", 0),
+        key=lambda note: (
+            note.get("liked_count", 0)
+            + note.get("collected_count", 0)
+            + note.get("comment_count", 0) * 2
+            + note.get("share_count", 0) * 2
+        ),
         reverse=True,
     )[:5]
+    notes_with_likes = [note for note in usable if note.get("liked_count", 0) > 0]
     topic_names = "、".join(item["name"] for item in top_topics[:4])
     common_hooks = "、".join(item["name"] for item in sorted(hook_patterns, key=lambda item: item["count"], reverse=True)[:3])
     positioning_summary = (
@@ -354,7 +245,14 @@ def build_basic_analysis(notes: list[dict[str, Any]], profile: dict[str, Any], w
         "average_body_length": average_body_length,
         "average_paragraphs": average_paragraphs,
         "average_likes": round(sum(note.get("liked_count", 0) for note in usable) / len(usable), 1) if usable else 0,
+        "average_collections": round(sum(note.get("collected_count", 0) for note in usable) / len(usable), 1) if usable else 0,
         "average_comments": round(sum(note.get("comment_count", 0) for note in usable) / len(usable), 1) if usable else 0,
+        "average_shares": round(sum(note.get("share_count", 0) for note in usable) / len(usable), 1) if usable else 0,
+        "average_save_like_ratio": round(
+            sum(note.get("collected_count", 0) / note["liked_count"] for note in notes_with_likes)
+            / len(notes_with_likes),
+            3,
+        ) if notes_with_likes else 0,
         "hook_patterns": hook_patterns,
         "top_topics": top_topics,
         "top_notes": [
@@ -364,6 +262,7 @@ def build_basic_analysis(notes: list[dict[str, Any]], profile: dict[str, Any], w
                 "liked_count": note.get("liked_count", 0),
                 "comment_count": note.get("comment_count", 0),
                 "collected_count": note.get("collected_count", 0),
+                "share_count": note.get("share_count", 0),
             }
             for note in top_notes
         ],
@@ -373,52 +272,191 @@ def build_basic_analysis(notes: list[dict[str, Any]], profile: dict[str, Any], w
             "followers": profile.get("followers", 0),
             "following": profile.get("following", 0),
             "total_engagement": profile.get("total_engagement", 0),
+            "note_count": (profile.get("public_metrics") or {}).get("note_count", 0),
         },
         "warnings": warnings,
     }
 
 
-async def analyze_account(account: CreatorAccount) -> tuple[dict[str, Any], list[dict[str, Any]], dict[str, Any]]:
-    resolved_user_id = await _resolve_xhs_user_id(account.xhs_user_id)
-    profile_data = await run_xhs_command("user", resolved_user_id, timeout_seconds=45)
-    posts_data = await run_xhs_command("user-posts", resolved_user_id, timeout_seconds=60)
-    profile = _profile_summary(profile_data, resolved_user_id)
-    raw_notes = posts_data.get("notes") if isinstance(posts_data.get("notes"), list) else []
-    listed_notes = [_note_from_listing(item) for item in raw_notes if isinstance(item, dict)]
-    selected_notes = _representative_notes(listed_notes)
-    detailed_notes: list[dict[str, Any]] = []
-    warnings: list[str] = []
-
-    for note in selected_notes:
-        target = note["id"]
-        if note["xsec_token"]:
-            target = (
-                f"https://www.xiaohongshu.com/explore/{note['id']}"
-                f"?xsec_token={quote(note['xsec_token'], safe='')}&xsec_source=pc_user"
-            )
-        try:
-            note_data = await run_xhs_command("read", target, timeout_seconds=45)
-            detailed_notes.append(_merge_note_detail(note, _note_card(note_data)))
-        except HTTPException:
-            detailed_notes.append(note)
-            warnings.append(f"《{note['title'] or note['id']}》正文读取失败，仅分析标题和互动数据")
-
-    analysis = build_basic_analysis(detailed_notes, profile, warnings)
-    stored_profile = {
-        **profile,
-        "tags": profile_data.get("tags") if isinstance(profile_data.get("tags"), list) else [],
+def creator_note_to_dict(note: CreatorAccountNote) -> dict[str, Any]:
+    engagement_score = (
+        note.liked_count + note.collected_count
+        + note.comment_count * 2 + note.share_count * 2
+    )
+    return {
+        "id": note.xhs_note_id,
+        "title": note.title or "",
+        "content": note.content or "",
+        "cover_url": note.cover_url or "",
+        "source_url": note.source_url or "",
+        "note_type": note.note_type or "normal",
+        "is_private": bool(note.is_private),
+        "liked_count": note.liked_count or 0,
+        "collected_count": note.collected_count or 0,
+        "comment_count": note.comment_count or 0,
+        "share_count": note.share_count or 0,
+        "engagement_score": engagement_score,
+        "save_like_ratio": (
+            round((note.collected_count or 0) / note.liked_count, 3)
+            if note.liked_count else 0
+        ),
+        "tags": note.tags or [],
+        "published_at": note.published_at.isoformat() if note.published_at else None,
+        "first_seen_at": note.first_seen_at.isoformat() if note.first_seen_at else None,
+        "last_seen_at": note.last_seen_at.isoformat() if note.last_seen_at else None,
     }
-    stored_notes = [{key: value for key, value in note.items() if key != "xsec_token"} for note in detailed_notes]
-    return stored_profile, stored_notes, analysis
+
+
+def _upsert_account_notes(
+    db: Session,
+    account: CreatorAccount,
+    notes: list[dict[str, Any]],
+    now: datetime,
+) -> int:
+    note_ids = [note.get("xhs_note_id") for note in notes if note.get("xhs_note_id")]
+    existing = {
+        row.xhs_note_id: row
+        for row in db.query(CreatorAccountNote).filter(
+            CreatorAccountNote.creator_account_id == account.id,
+            CreatorAccountNote.xhs_note_id.in_(note_ids),
+        ).all()
+    } if note_ids else {}
+
+    fields = (
+        "title", "content", "cover_url", "source_url", "note_type", "is_private",
+        "liked_count", "collected_count", "comment_count", "share_count", "tags",
+        "source_data", "published_at",
+    )
+    for note_data in notes:
+        note_id = str(note_data.get("xhs_note_id") or "").strip()
+        if not note_id:
+            continue
+        row = existing.get(note_id)
+        if row is None:
+            row = CreatorAccountNote(
+                creator_account_id=account.id,
+                xhs_note_id=note_id,
+                first_seen_at=now,
+            )
+            db.add(row)
+            existing[note_id] = row
+        for field in fields:
+            value = note_data.get(field)
+            if field in {"content", "cover_url", "source_url"} and not value and getattr(row, field, None):
+                continue
+            setattr(row, field, value)
+        row.last_seen_at = now
+        row.updated_at = now
+    db.flush()
+    return len(note_ids)
+
+
+async def sync_account(
+    account: CreatorAccount,
+    db: Session,
+    requested_source: Optional[DataSource],
+    max_pages: int,
+    monitor_run_id: Optional[str] = None,
+    detail_notes: Optional[int] = None,
+    preferred_source: Optional[Literal["cli", "tikhub"]] = None,
+    published_since: Optional[datetime] = None,
+) -> CreatorAccount:
+    source = requested_source or account.data_source or "auto"
+    identifier = account.xhs_user_id
+    resolved_user_id = (account.profile_data or {}).get("user_id")
+    if source in {"auto", "tikhub"} and isinstance(resolved_user_id, str):
+        if re.fullmatch(r"[0-9a-fA-F]{24}", resolved_user_id):
+            identifier = resolved_user_id
+    result = await sync_public_account(
+        identifier,
+        source,
+        max_pages,
+        detail_notes=detail_notes,
+        preferred_source=preferred_source,
+        published_since=published_since,
+    )
+    profile = result["profile"]
+    warnings = result.get("warnings") or []
+    now = datetime.utcnow()
+    _upsert_account_notes(db, account, result.get("notes") or [], now)
+    if monitor_run_id:
+        for note in result.get("notes") or []:
+            note_id = str(note.get("xhs_note_id") or "").strip()
+            if not note_id:
+                continue
+            db.add(CreatorAccountNoteSnapshot(
+                creator_account_id=account.id,
+                monitor_run_id=monitor_run_id,
+                xhs_note_id=note_id,
+                liked_count=int(note.get("liked_count") or 0),
+                collected_count=int(note.get("collected_count") or 0),
+                comment_count=int(note.get("comment_count") or 0),
+                share_count=int(note.get("share_count") or 0),
+                captured_at=now,
+            ))
+
+    note_rows = (
+        db.query(CreatorAccountNote)
+        .filter(CreatorAccountNote.creator_account_id == account.id)
+        .order_by(CreatorAccountNote.published_at.desc(), CreatorAccountNote.first_seen_at.desc())
+        .limit(2000)
+        .all()
+    )
+    public_notes = [creator_note_to_dict(note) for note in note_rows if not note.is_private]
+    representative = _representative_notes(public_notes)
+    analysis = build_basic_analysis(public_notes, profile, warnings)
+    analysis.update({
+        "data_source": result["source"],
+        "pages_fetched": result.get("pages_fetched", 0),
+        "synced_note_count": len(note_rows),
+        "public_note_count": len(public_notes),
+        "last_sync_new_or_updated": len(result.get("notes") or []),
+        "data_scope": "public",
+        "has_more": bool(result.get("has_more")),
+        "page_limit_reached": bool(result.get("page_limit_reached")),
+        "window_covered": bool(result.get("window_covered")),
+    })
+
+    account.red_id = profile.get("red_id") or account.red_id
+    account.nickname = profile.get("nickname") or account.nickname
+    account.avatar_url = profile.get("avatar_url") or account.avatar_url
+    account.bio = profile.get("bio") or account.bio
+    account.ip_location = profile.get("ip_location") or account.ip_location
+    resolved_user_id = profile.get("user_id") or account.xhs_user_id
+    account.profile_url = f"https://www.xiaohongshu.com/user/profile/{resolved_user_id}"
+    account.profile_data = profile
+    account.sample_notes = representative
+    account.analysis = analysis
+    account.last_sync_source = result["source"]
+    account.last_sync_status = "success"
+    account.last_sync_error = None
+    account.synced_note_count = len(note_rows)
+    account.last_analyzed_at = now
+    account.updated_at = now
+    db.add(CreatorAccountSnapshot(
+        creator_account_id=account.id,
+        data_source=result["source"],
+        followers=profile.get("followers", 0),
+        following=profile.get("following", 0),
+        total_engagement=profile.get("total_engagement", 0),
+        note_count=len(note_rows),
+        fetched_at=now,
+    ))
+    db.commit()
+    db.refresh(account)
+    return account
 
 
 @router.get("")
 async def list_creator_accounts(
     active_only: bool = False,
+    account_kind: Optional[AccountKind] = None,
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
     query = db.query(CreatorAccount)
+    if account_kind:
+        query = query.filter(CreatorAccount.account_kind == account_kind)
     if active_only or user.role not in {"admin", "manager"}:
         query = query.filter(CreatorAccount.is_active == True)
     accounts = query.order_by(CreatorAccount.is_active.desc(), CreatorAccount.name.asc()).all()
@@ -436,6 +474,8 @@ async def create_creator_account(
     account = CreatorAccount(
         name=payload.name.strip(),
         xhs_user_id=payload.xhs_user_id,
+        account_kind=payload.account_kind,
+        data_source=payload.data_source,
         profile_url=f"https://www.xiaohongshu.com/user/profile/{payload.xhs_user_id}",
         positioning=_clean_text(payload.positioning),
         target_audience=_clean_text(payload.target_audience),
@@ -477,6 +517,16 @@ async def update_creator_account(
         account.sample_notes = []
         account.analysis = {}
         account.last_analyzed_at = None
+        account.last_sync_source = None
+        account.last_sync_status = "never"
+        account.last_sync_error = None
+        account.synced_note_count = 0
+        db.query(CreatorAccountNote).filter(
+            CreatorAccountNote.creator_account_id == account.id
+        ).delete(synchronize_session=False)
+        db.query(CreatorAccountSnapshot).filter(
+            CreatorAccountSnapshot.creator_account_id == account.id
+        ).delete(synchronize_session=False)
 
     text_fields = {
         "positioning", "target_audience", "tone_style", "title_guidelines",
@@ -496,23 +546,114 @@ async def update_creator_account(
 @router.post("/{account_id}/analyze")
 async def analyze_creator_account(
     account_id: str,
-    _: User = Depends(require_manager),
+    source: Optional[DataSource] = Query(default=None),
+    max_pages: int = Query(default=10, ge=1, le=30),
+    _: User = Depends(require_account_query_operator),
     db: Session = Depends(get_db),
 ):
     account = db.query(CreatorAccount).filter(CreatorAccount.id == account_id).first()
     if not account:
         raise HTTPException(status_code=404, detail="创作账号不存在")
-    profile, notes, analysis = await analyze_account(account)
-    account.red_id = profile.get("red_id") or account.red_id
-    account.nickname = profile.get("nickname") or account.nickname
-    account.avatar_url = profile.get("avatar_url") or account.avatar_url
-    account.bio = profile.get("bio") or account.bio
-    account.ip_location = profile.get("ip_location") or account.ip_location
-    account.profile_url = f"https://www.xiaohongshu.com/user/profile/{profile.get('user_id') or account.xhs_user_id}"
-    account.profile_data = profile
-    account.sample_notes = notes
-    account.analysis = analysis
-    account.last_analyzed_at = datetime.utcnow()
-    db.commit()
-    db.refresh(account)
-    return creator_account_to_dict(account)
+    try:
+        synced = await sync_account(account, db, source, max_pages)
+    except HTTPException as error:
+        account.last_sync_status = "failed"
+        account.last_sync_error = str(error.detail)[:2000]
+        account.updated_at = datetime.utcnow()
+        db.commit()
+        raise
+    return creator_account_to_dict(synced)
+
+
+@router.get("/status/public-data")
+async def get_public_data_status(_: User = Depends(get_current_user)):
+    from backend.account_monitor import monitor_schedule_status
+
+    status = await public_source_status()
+    status["daily_monitor"] = monitor_schedule_status()
+    return status
+
+
+@router.post("/discover")
+async def discover_creator_accounts(
+    payload: CreatorDiscoveryRequest,
+    _: User = Depends(require_account_query_operator),
+):
+    return await discover_public_accounts(
+        payload.keywords,
+        payload.source,
+        payload.pages_per_keyword,
+    )
+
+
+@router.get("/{account_id}/notes")
+async def list_creator_account_notes(
+    account_id: str,
+    sort: Literal["published_at", "engagement", "likes", "collections", "comments"] = "engagement",
+    order: Literal["asc", "desc"] = "desc",
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=30, ge=1, le=100),
+    _: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    account = db.query(CreatorAccount).filter(CreatorAccount.id == account_id).first()
+    if not account:
+        raise HTTPException(status_code=404, detail="创作账号不存在")
+    query = db.query(CreatorAccountNote).filter(
+        CreatorAccountNote.creator_account_id == account_id,
+        CreatorAccountNote.is_private == False,
+    )
+    total = query.count()
+    if sort == "engagement":
+        expression = (
+            CreatorAccountNote.liked_count
+            + CreatorAccountNote.collected_count
+            + CreatorAccountNote.comment_count * 2
+            + CreatorAccountNote.share_count * 2
+        )
+    else:
+        expression = {
+            "published_at": CreatorAccountNote.published_at,
+            "likes": CreatorAccountNote.liked_count,
+            "collections": CreatorAccountNote.collected_count,
+            "comments": CreatorAccountNote.comment_count,
+        }[sort]
+    query = query.order_by(
+        expression.asc() if order == "asc" else expression.desc(),
+        CreatorAccountNote.published_at.desc(),
+    )
+    rows = query.offset((page - 1) * page_size).limit(page_size).all()
+    return {
+        "items": [creator_note_to_dict(row) for row in rows],
+        "total": total,
+        "page": page,
+        "page_size": page_size,
+    }
+
+
+@router.get("/{account_id}/snapshots")
+async def list_creator_account_snapshots(
+    account_id: str,
+    limit: int = Query(default=30, ge=1, le=180),
+    _: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    rows = (
+        db.query(CreatorAccountSnapshot)
+        .filter(CreatorAccountSnapshot.creator_account_id == account_id)
+        .order_by(CreatorAccountSnapshot.fetched_at.desc())
+        .limit(limit)
+        .all()
+    )
+    return [
+        {
+            "id": row.id,
+            "data_source": row.data_source,
+            "followers": row.followers,
+            "following": row.following,
+            "total_engagement": row.total_engagement,
+            "note_count": row.note_count,
+            "fetched_at": row.fetched_at.isoformat(),
+        }
+        for row in rows
+    ]

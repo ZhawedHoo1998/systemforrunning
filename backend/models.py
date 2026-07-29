@@ -189,6 +189,102 @@ class CreatorAccountSnapshot(Base):
     fetched_at = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
 
 
+class CreatorAccountMonitorRun(Base):
+    __tablename__ = "creator_account_monitor_runs"
+    __table_args__ = (
+        UniqueConstraint("creator_account_id", "monitor_date", name="uq_creator_account_monitor_day"),
+    )
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    creator_account_id = Column(
+        String(36),
+        ForeignKey("creator_accounts.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    monitor_date = Column(Date, nullable=False, index=True)
+    status = Column(String(20), nullable=False, default="running", index=True)
+    data_source = Column(String(20), nullable=True)
+    pages_fetched = Column(Integer, nullable=False, default=0)
+    notes_checked = Column(Integer, nullable=False, default=0)
+    analysis = Column(JSON, default=dict)
+    error = Column(Text, nullable=True)
+    started_at = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
+    completed_at = Column(DateTime, nullable=True, index=True)
+
+
+class CreatorAccountNoteSnapshot(Base):
+    __tablename__ = "creator_account_note_snapshots"
+    __table_args__ = (
+        UniqueConstraint("monitor_run_id", "xhs_note_id", name="uq_creator_note_monitor_snapshot"),
+    )
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    creator_account_id = Column(
+        String(36),
+        ForeignKey("creator_accounts.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    monitor_run_id = Column(
+        String(36),
+        ForeignKey("creator_account_monitor_runs.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    xhs_note_id = Column(String(100), nullable=False, index=True)
+    liked_count = Column(Integer, nullable=False, default=0)
+    collected_count = Column(Integer, nullable=False, default=0)
+    comment_count = Column(Integer, nullable=False, default=0)
+    share_count = Column(Integer, nullable=False, default=0)
+    captured_at = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
+
+
+class CreatorPerformanceAlert(Base):
+    __tablename__ = "creator_performance_alerts"
+    __table_args__ = (
+        UniqueConstraint("monitor_run_id", "xhs_note_id", name="uq_creator_performance_alert_note"),
+    )
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    creator_account_id = Column(
+        String(36),
+        ForeignKey("creator_accounts.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    monitor_run_id = Column(
+        String(36),
+        ForeignKey("creator_account_monitor_runs.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    xhs_note_id = Column(String(100), nullable=False, index=True)
+    title = Column(String(500), nullable=False)
+    message = Column(Text, nullable=False)
+    source_url = Column(String(2000), nullable=True)
+    metrics = Column(JSON, default=dict)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
+
+
+class CreatorPerformanceAlertReceipt(Base):
+    __tablename__ = "creator_performance_alert_receipts"
+
+    alert_id = Column(
+        String(36),
+        ForeignKey("creator_performance_alerts.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    user_id = Column(
+        String(36),
+        ForeignKey("users.id", ondelete="CASCADE"),
+        primary_key=True,
+        index=True,
+    )
+    seen_at = Column(DateTime, nullable=True, index=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+
 class WeeklyGoal(Base):
     __tablename__ = "weekly_goals"
 

@@ -275,6 +275,7 @@ def load_creator_account(db: Session, account_id: Optional[str]):
         return None
     account = db.query(CreatorAccount).filter(
         CreatorAccount.id == account_id,
+        CreatorAccount.account_kind == "owned",
         CreatorAccount.is_active == True,
     ).first()
     if not account:

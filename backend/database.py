@@ -189,10 +189,7 @@ def migrate_creator_account_intelligence():
         """))
         connection.execute(text("""
             UPDATE creator_accounts
-            SET synced_note_count = CASE
-                WHEN sample_notes IS NULL THEN 0
-                ELSE synced_note_count
-            END
+            SET synced_note_count = 0
             WHERE synced_note_count IS NULL
         """))
 
