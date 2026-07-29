@@ -38,11 +38,15 @@ api_docs_enabled = os.getenv("API_DOCS_ENABLED", "true").lower() == "true"
 async def lifespan(_: FastAPI):
     stop_event = asyncio.Event()
     monitor_task = asyncio.create_task(account_monitor_scheduler(stop_event))
+    archive_task = asyncio.create_task(
+        creator_accounts.resume_incomplete_owned_account_archives()
+    )
     try:
         yield
     finally:
         stop_event.set()
-        await monitor_task
+        archive_task.cancel()
+        await asyncio.gather(monitor_task, archive_task, return_exceptions=True)
 
 
 app = FastAPI(

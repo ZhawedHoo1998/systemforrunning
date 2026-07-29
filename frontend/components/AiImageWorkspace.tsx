@@ -41,6 +41,7 @@ interface ImageThreadSummary {
 
 interface AiImageWorkspaceProps {
   selectedMaterialImages: SourceImage[]
+  selectedCreatorNoteImages: SourceImage[]
   uploadedReferenceImages: SourceImage[]
   historicalReferenceImages: SourceImage[]
   generatedImageSources: SourceImage[]
@@ -65,6 +66,7 @@ interface AiImageWorkspaceProps {
 
 export function AiImageWorkspace({
   selectedMaterialImages,
+  selectedCreatorNoteImages,
   uploadedReferenceImages,
   historicalReferenceImages,
   generatedImageSources,
@@ -189,11 +191,13 @@ export function AiImageWorkspace({
   const renderSources = (isExpanded: boolean) => (
     <div className={cn("space-y-4", isExpanded && "space-y-5")}>
       {renderSourceSection("从已选素材选择", selectedMaterialImages, isExpanded)}
+      {renderSourceSection("账号旧帖图片", selectedCreatorNoteImages, isExpanded)}
       {renderSourceSection("本次上传", uploadedReferenceImages, isExpanded)}
       {renderSourceSection("历史参考", historicalReferenceImages, isExpanded)}
       {renderSourceSection("历史生成", generatedImageSources, isExpanded)}
 
       {selectedMaterialImages.length === 0
+        && selectedCreatorNoteImages.length === 0
         && uploadedReferenceImages.length === 0
         && historicalReferenceImages.length === 0
         && generatedImageSources.length === 0 && (

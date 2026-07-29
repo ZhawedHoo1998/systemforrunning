@@ -344,6 +344,7 @@ export interface CreatorAccountSampleNote {
   title: string
   content: string
   cover_url: string
+  source_url: string
   note_type: string
   is_private: boolean
   liked_count: number
@@ -354,6 +355,13 @@ export interface CreatorAccountSampleNote {
   save_like_ratio?: number
   tags: string[]
   published_at: string | null
+  first_seen_at: string | null
+  last_seen_at: string | null
+  image_count?: number
+  has_video?: boolean
+  detail_archived?: boolean
+  media_archived?: boolean
+  attachments?: Attachment[]
 }
 
 export interface CreatorMonitoringNote {
@@ -417,6 +425,36 @@ export interface CreatorMonitoringAnalysis {
   generated_alert_count: number
 }
 
+export interface CreatorHistoryArchive {
+  status?: "queued" | "running" | "complete" | "partial" | "failed"
+  stage?: "listing" | "details" | "media" | "complete"
+  total_notes?: number
+  body_note_count?: number
+  missing_body_count?: number
+  detail_note_count?: number
+  missing_detail_count?: number
+  detail_total?: number
+  detail_completed?: number
+  detail_failed?: number
+  pages_fetched?: number
+  has_more?: boolean
+  page_limit_reached?: boolean
+  last_progress_at?: string
+  detail_errors?: string[]
+  media_note_count?: number
+  missing_media_count?: number
+  local_image_count?: number
+  local_video_count?: number
+  media_total?: number
+  media_completed?: number
+  media_failed?: number
+  media_errors?: string[]
+  source?: "cli" | "tikhub"
+  started_at?: string
+  completed_at?: string | null
+  error?: string | null
+}
+
 export interface CreatorAccountAnalysis {
   version?: number
   sample_count?: number
@@ -433,6 +471,7 @@ export interface CreatorAccountAnalysis {
   pages_fetched?: number
   synced_note_count?: number
   public_note_count?: number
+  body_note_count?: number
   last_sync_new_or_updated?: number
   data_scope?: "public"
   has_more?: boolean
@@ -457,6 +496,7 @@ export interface CreatorAccountAnalysis {
   }
   warnings?: string[]
   monitoring_7d?: CreatorMonitoringAnalysis
+  history_archive?: CreatorHistoryArchive
 }
 
 export interface CreatorAccount {
@@ -555,9 +595,16 @@ export async function analyzeCreatorAccount(
   return res.json()
 }
 
+export async function archiveCreatorAccount(id: string): Promise<CreatorAccount> {
+  const res = await apiFetch(`${API_BASE}/api/creator-accounts/${id}/archive`, { method: "POST" })
+  if (!res.ok) await throwApiError(res, "账号历史帖子归档失败")
+  return res.json()
+}
+
 export interface CreatorAccountNotesResponse {
   items: CreatorAccountSampleNote[]
   total: number
+  body_count: number
   page: number
   page_size: number
 }
@@ -597,6 +644,7 @@ export async function getCreatorAccountNotes(
   params: {
     sort?: "published_at" | "engagement" | "likes" | "collections" | "comments"
     order?: "asc" | "desc"
+    q?: string
     page?: number
     page_size?: number
   } = {},
@@ -604,6 +652,7 @@ export async function getCreatorAccountNotes(
   const sp = new URLSearchParams()
   if (params.sort) sp.set("sort", params.sort)
   if (params.order) sp.set("order", params.order)
+  if (params.q) sp.set("q", params.q)
   if (params.page) sp.set("page", String(params.page))
   if (params.page_size) sp.set("page_size", String(params.page_size))
   const res = await apiFetch(`${API_BASE}/api/creator-accounts/${id}/notes?${sp.toString()}`)
@@ -919,9 +968,11 @@ export interface AiDraft {
 }
 
 export interface AiConversation {
-  version: 1 | 2 | 3 | 4
+  version: 1 | 2 | 3 | 4 | 5
   task: AiTask
   creator_account_id?: string | null
+  selected_creator_note_ids?: string[]
+  selected_creator_notes?: CreatorAccountSampleNote[]
   messages: AiMessage[]
   selected_material_ids: string[]
   scope_filter: "all" | MaterialScope
@@ -958,6 +1009,7 @@ export interface AiChatRequest {
   brand?: string
   car_model?: string
   material_ids: string[]
+  creator_note_ids?: string[]
   messages: AiMessage[]
 }
 
@@ -973,6 +1025,7 @@ function normalizeAiChatRequest(payload: AiChatRequest): AiChatRequest {
     brand: payload.brand?.trim().slice(0, 200),
     car_model: payload.car_model?.trim().slice(0, 200),
     material_ids: payload.material_ids.slice(0, 12),
+    creator_note_ids: payload.creator_note_ids?.slice(0, 20),
     messages,
   }
 }
@@ -985,6 +1038,8 @@ export interface AiImageRequest {
   brand?: string
   car_model?: string
   material_ids: string[]
+  creator_account_id?: string
+  creator_note_ids?: string[]
 }
 
 export interface AiImageResult {
@@ -1281,10 +1336,12 @@ export async function generateAiImage(payload: AiImageRequest): Promise<AiImageR
   formData.append("prompt", payload.prompt)
   payload.reference_images.forEach((image) => formData.append("reference_images", image, image.name))
   formData.append("material_ids", JSON.stringify(payload.material_ids))
+  formData.append("creator_note_ids", JSON.stringify(payload.creator_note_ids || []))
   formData.append("image_history", JSON.stringify(payload.history || []))
   formData.append("reference_attachments", JSON.stringify(payload.reference_attachments))
   if (payload.brand) formData.append("brand", payload.brand)
   if (payload.car_model) formData.append("car_model", payload.car_model)
+  if (payload.creator_account_id) formData.append("creator_account_id", payload.creator_account_id)
 
   const res = await apiFetch(`${API_BASE}/api/ai/images`, {
     method: "POST",

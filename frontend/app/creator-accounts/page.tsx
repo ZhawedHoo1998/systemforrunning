@@ -43,6 +43,7 @@ import {
 import { Textarea } from "@/components/ui/textarea"
 import {
   analyzeCreatorAccount,
+  archiveCreatorAccount,
   createCreatorAccount,
   discoverCreatorAccounts,
   getCreatorAccountNotes,
@@ -119,6 +120,40 @@ const SOURCE_LABELS: Record<CreatorAccount["data_source"] | "cli" | "tikhub", st
   tikhub: "TikHub",
 }
 
+const HISTORY_ARCHIVE_STATUS_LABELS = {
+  queued: "等待归档",
+  running: "正在归档",
+  complete: "归档完成",
+  partial: "部分归档",
+  failed: "归档失败",
+} as const
+
+function archiveProgressText(
+  archive: NonNullable<CreatorAccount["analysis"]["history_archive"]>,
+) {
+  if (archive.status === "queued") return "归档任务已排队"
+  if (archive.status === "running" && archive.stage === "listing") {
+    return `正在逐页拉取历史列表 · 已抓 ${archive.pages_fetched || 0} 页 · 已保存 ${archive.total_notes || 0} 篇`
+  }
+  if (archive.status === "running" && archive.stage === "details") {
+    return `正在补全全部帖子详情 · ${archive.detail_completed || 0}/${archive.detail_total || archive.total_notes || 0} 篇`
+  }
+  if (archive.status === "running" && archive.stage === "media") {
+    return `正在下载帖子图片和视频到本地 · ${archive.media_completed || 0}/${archive.media_total || archive.total_notes || 0} 篇`
+  }
+  if (archive.status === "complete") {
+    return "公开历史列表、完整详情及帖子媒体均已保存到本地"
+  }
+  if (archive.status === "partial") {
+    if (archive.missing_detail_count || archive.detail_failed) {
+      return `仍有 ${archive.missing_detail_count || archive.detail_failed || 0} 篇详情待补全，可再次归档续跑`
+    }
+    return `仍有 ${archive.missing_media_count || archive.media_failed || 0} 篇媒体待保存，可再次归档续跑`
+  }
+  if (archive.status === "failed") return "归档中断，已抓取的数据均已保存，可再次归档续跑"
+  return "准备归档公开历史帖子"
+}
+
 export default function CreatorAccountsPage() {
   const { user } = useAuth()
   const [accounts, setAccounts] = useState<CreatorAccount[]>([])
@@ -131,11 +166,13 @@ export default function CreatorAccountsPage() {
   const [pillarsText, setPillarsText] = useState("")
   const [saving, setSaving] = useState(false)
   const [analyzingId, setAnalyzingId] = useState("")
+  const [archivingId, setArchivingId] = useState("")
   const [submitAndAnalyze, setSubmitAndAnalyze] = useState(false)
   const [sourceStatus, setSourceStatus] = useState<XhsPublicDataStatus | null>(null)
   const [syncPageLimit, setSyncPageLimit] = useState(10)
   const [notes, setNotes] = useState<CreatorAccountSampleNote[]>([])
   const [notesTotal, setNotesTotal] = useState(0)
+  const [notesBodyCount, setNotesBodyCount] = useState(0)
   const [notesLoading, setNotesLoading] = useState(false)
   const [notesSort, setNotesSort] = useState<"engagement" | "published_at" | "collections" | "likes" | "comments">("engagement")
   const [discoveryOpen, setDiscoveryOpen] = useState(false)
@@ -168,6 +205,7 @@ export default function CreatorAccountsPage() {
         setAccounts(results)
         setSourceStatus(status)
         setSyncPageLimit(status.default_max_pages)
+        if (results.length) setNotesLoading(true)
         setSelectedAccountId((current) => current || results[0]?.id || "")
         setError("")
       })
@@ -185,11 +223,12 @@ export default function CreatorAccountsPage() {
   useEffect(() => {
     if (!selectedAccount?.id) return
     let active = true
-    getCreatorAccountNotes(selectedAccount.id, { sort: notesSort, page_size: 100 })
+    getCreatorAccountNotes(selectedAccount.id, { sort: notesSort, page_size: 500 })
       .then((result) => {
         if (!active) return
         setNotes(result.items)
         setNotesTotal(result.total)
+        setNotesBodyCount(result.body_count)
       })
       .catch((requestError) => {
         if (active) setError(requestError instanceof Error ? requestError.message : "账号笔记加载失败")
@@ -202,6 +241,25 @@ export default function CreatorAccountsPage() {
     }
   }, [selectedAccount?.id, selectedAccount?.last_analyzed_at, notesSort])
 
+  useEffect(() => {
+    const archiveStatus = selectedAccount?.analysis.history_archive?.status
+    if (!selectedAccount?.id || !archiveStatus || !["queued", "running"].includes(archiveStatus)) return
+
+    let active = true
+    const refreshArchiveStatus = () => {
+      getCreatorAccounts()
+        .then((results) => {
+          if (active) setAccounts(results)
+        })
+        .catch(() => undefined)
+    }
+    const timer = window.setInterval(refreshArchiveStatus, 3000)
+    return () => {
+      active = false
+      window.clearInterval(timer)
+    }
+  }, [selectedAccount?.analysis.history_archive?.status, selectedAccount?.id])
+
   const replaceAccount = (updated: CreatorAccount) => {
     setAccounts((current) => {
       const exists = current.some((account) => account.id === updated.id)
@@ -209,6 +267,7 @@ export default function CreatorAccountsPage() {
         ? current.map((account) => account.id === updated.id ? updated : account)
         : [...current, updated]
     })
+    setNotesLoading(true)
     setSelectedAccountId(updated.id)
   }
 
@@ -249,6 +308,19 @@ export default function CreatorAccountsPage() {
     }
   }
 
+  const handleArchive = async (account: CreatorAccount) => {
+    if (!canQuery || account.account_kind !== "owned") return
+    setArchivingId(account.id)
+    setError("")
+    try {
+      replaceAccount(await archiveCreatorAccount(account.id))
+    } catch (requestError) {
+      setError(requestError instanceof Error ? requestError.message : "账号历史帖子归档失败")
+    } finally {
+      setArchivingId("")
+    }
+  }
+
   const handleSubmit = async (event: FormEvent) => {
     event.preventDefault()
     if (!canManage) return
@@ -269,7 +341,8 @@ export default function CreatorAccountsPage() {
         : await createCreatorAccount(payload)
       replaceAccount(saved)
       setDialogOpen(false)
-      if (shouldAnalyze) await handleAnalyze(saved)
+      const archiveStartedOnCreate = !editingAccount && saved.account_kind === "owned"
+      if (shouldAnalyze && !archiveStartedOnCreate) await handleAnalyze(saved)
     } catch (requestError) {
       setError(requestError instanceof Error ? requestError.message : "创作账号保存失败")
     } finally {
@@ -484,7 +557,14 @@ export default function CreatorAccountsPage() {
                         {selectedAccount.account_kind === "owned" ? "自有账号" : "对标账号"}
                       </Badge>
                       {selectedAccount.last_analyzed_at && <Badge variant="outline"><CheckCircle2 />已同步</Badge>}
-                      {selectedAccount.analysis.page_limit_reached && <Badge variant="secondary">已达页数上限</Badge>}
+                      {selectedAccount.analysis.page_limit_reached
+                        && !["queued", "running"].includes(selectedAccount.analysis.history_archive?.status || "")
+                        && <Badge variant="secondary">已达页数上限</Badge>}
+                      {selectedAccount.analysis.history_archive?.status && (
+                        <Badge variant={selectedAccount.analysis.history_archive.status === "failed" ? "destructive" : "outline"}>
+                          {HISTORY_ARCHIVE_STATUS_LABELS[selectedAccount.analysis.history_archive.status]}
+                        </Badge>
+                      )}
                     </div>
                     <div className="mt-1 flex flex-wrap items-center gap-3 text-xs text-muted-foreground">
                       <span>数据时间：{formatDate(selectedAccount.last_analyzed_at)}</span>
@@ -496,16 +576,65 @@ export default function CreatorAccountsPage() {
                       )}
                     </div>
                   </div>
-                  {canQuery && <Button type="button" variant="outline" onClick={() => void handleAnalyze(selectedAccount)} disabled={analyzingId === selectedAccount.id}>
-                    {analyzingId === selectedAccount.id ? <LoaderCircle className="animate-spin" /> : <RefreshCw />}
-                    {analyzingId === selectedAccount.id ? "正在同步" : "同步并重新分析"}
-                  </Button>}
+                  {canQuery && (
+                    <div className="flex flex-wrap items-center gap-2">
+                      {selectedAccount.account_kind === "owned" && (
+                        <Button
+                          type="button"
+                          variant="outline"
+                          onClick={() => void handleArchive(selectedAccount)}
+                          disabled={
+                            archivingId === selectedAccount.id
+                            || ["queued", "running"].includes(selectedAccount.analysis.history_archive?.status || "")
+                          }
+                        >
+                          {archivingId === selectedAccount.id || ["queued", "running"].includes(selectedAccount.analysis.history_archive?.status || "")
+                            ? <LoaderCircle className="animate-spin" />
+                            : <Database />}
+                          {["queued", "running"].includes(selectedAccount.analysis.history_archive?.status || "")
+                            ? "正在归档历史"
+                            : "归档历史帖子"}
+                        </Button>
+                      )}
+                      <Button type="button" variant="outline" onClick={() => void handleAnalyze(selectedAccount)} disabled={analyzingId === selectedAccount.id}>
+                        {analyzingId === selectedAccount.id ? <LoaderCircle className="animate-spin" /> : <RefreshCw />}
+                        {analyzingId === selectedAccount.id ? "正在同步" : "同步并重新分析"}
+                      </Button>
+                    </div>
+                  )}
                 </div>
 
                 {selectedAccount.last_sync_error && (
                   <div className="mt-4 flex items-start gap-2 border-y border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
                     <AlertCircle className="mt-0.5 size-4 shrink-0" />
                     {selectedAccount.last_sync_error}
+                  </div>
+                )}
+
+                {selectedAccount.account_kind === "owned" && selectedAccount.analysis.history_archive && (
+                  <div className="mt-4 flex items-start gap-3 border-y bg-card px-4 py-3 text-sm">
+                    <Database className="mt-0.5 size-4 shrink-0 text-primary" />
+                    <div className="min-w-0">
+                      <p className="font-medium">
+                        历史帖子 {selectedAccount.analysis.history_archive.total_notes || 0} 篇 ·
+                        完整详情 {selectedAccount.analysis.history_archive.detail_note_count || 0}/
+                        {selectedAccount.analysis.history_archive.total_notes || 0} 篇 ·
+                        含正文 {selectedAccount.analysis.history_archive.body_note_count || 0} 篇 ·
+                        本地图片 {selectedAccount.analysis.history_archive.local_image_count || 0} 张
+                        {(selectedAccount.analysis.history_archive.local_video_count || 0) > 0
+                          ? ` · 本地视频 ${selectedAccount.analysis.history_archive.local_video_count} 条`
+                          : ""}
+                      </p>
+                      <p className="mt-1 text-xs text-muted-foreground">
+                        {archiveProgressText(selectedAccount.analysis.history_archive)}
+                        {selectedAccount.analysis.history_archive.completed_at
+                          ? ` · 完成于 ${formatDate(selectedAccount.analysis.history_archive.completed_at)}`
+                          : ""}
+                      </p>
+                      {selectedAccount.analysis.history_archive.error && (
+                        <p className="mt-1 text-xs text-red-700">{selectedAccount.analysis.history_archive.error}</p>
+                      )}
+                    </div>
                   </div>
                 )}
 
@@ -648,7 +777,9 @@ export default function CreatorAccountsPage() {
                   <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
                     <div>
                       <h3 className="text-sm font-semibold">公开笔记排行</h3>
-                      <p className="mt-1 text-xs text-muted-foreground">共 {notesTotal} 篇，当前显示前 {Math.min(notes.length, 100)} 篇</p>
+                      <p className="mt-1 text-xs text-muted-foreground">
+                        共 {notesTotal} 篇 · 含正文 {notesBodyCount} 篇 · 当前显示 {notes.length} 篇
+                      </p>
                     </div>
                     <Select value={notesSort} onValueChange={(value) => { setNotesLoading(true); setNotesSort(value as typeof notesSort) }}>
                       <SelectTrigger className="w-36 bg-background shadow-none" aria-label="笔记排序">

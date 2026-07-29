@@ -2,7 +2,7 @@ import asyncio
 import os
 import re
 from datetime import datetime, timezone
-from typing import Any, Literal
+from typing import Any, Awaitable, Callable, Literal
 from urllib.parse import quote
 
 import httpx
@@ -13,8 +13,9 @@ from backend.routers.xiaohongshu import _get_cli_path, run_xhs_command
 
 PublicDataSource = Literal["auto", "cli", "tikhub"]
 TIKHUB_DEFAULT_BASE_URL = "https://api.tikhub.io"
-MAX_SYNC_PAGES = 30
-MAX_DETAIL_NOTES = 12
+MAX_SYNC_PAGES = 1000
+MAX_DETAIL_NOTES = 200
+SyncPageCallback = Callable[[list[dict[str, Any]], dict[str, Any]], Awaitable[None]]
 
 
 async def public_source_status() -> dict[str, Any]:
@@ -105,13 +106,17 @@ def _image_url(value: Any) -> str:
     if not isinstance(value, dict):
         return ""
     for key in (
-        "url_default", "url_pre", "url", "original_url", "image", "imageb",
+        "url_default", "url_pre", "urlDefault", "urlPre", "url", "original_url",
+        "originalUrl", "image", "imageb",
         "master_url", "url_size_large",
     ):
         resolved = _image_url(value.get(key))
         if resolved:
             return resolved
-    for key in ("info_list", "images_list", "image_list", "backup_urls"):
+    for key in (
+        "info_list", "infoList", "images_list", "image_list", "imageList",
+        "backup_urls", "backupUrls",
+    ):
         resolved = _image_url(value.get(key))
         if resolved:
             return resolved
@@ -133,7 +138,7 @@ def _timestamp(value: Any) -> datetime | None:
 
 
 def _interaction_value(card: dict[str, Any], *keys: str) -> int:
-    interaction = card.get("interact_info")
+    interaction = card.get("interact_info") or card.get("interactInfo")
     if isinstance(interaction, dict):
         for key in keys:
             value = _number(interaction.get(key))
@@ -144,6 +149,41 @@ def _interaction_value(card: dict[str, Any], *keys: str) -> int:
         if value:
             return value
     return 0
+
+
+def _image_urls(value: Any) -> list[str]:
+    candidates = value if isinstance(value, list) else [value]
+    urls: list[str] = []
+    for candidate in candidates:
+        url = _image_url(candidate)
+        if url and url not in urls:
+            urls.append(url)
+    return urls
+
+
+def _video_url(value: Any) -> str:
+    if isinstance(value, str):
+        return value.replace("http://", "https://", 1) if value.startswith(("http://", "https://")) else ""
+    if isinstance(value, list):
+        for item in value:
+            resolved = _video_url(item)
+            if resolved:
+                return resolved
+        return ""
+    if not isinstance(value, dict):
+        return ""
+    for key in ("master_url", "masterUrl", "url", "video_url", "videoUrl"):
+        resolved = _video_url(value.get(key))
+        if resolved:
+            return resolved
+    for key in (
+        "media", "stream", "h264", "h265", "backup_urls", "backupUrls",
+        "media_v2", "mediaV2",
+    ):
+        resolved = _video_url(value.get(key))
+        if resolved:
+            return resolved
+    return ""
 
 
 def _page_reaches_cutoff(
@@ -162,7 +202,11 @@ def _page_reaches_cutoff(
     return bool(published and published[-1] <= published_since)
 
 
-def normalize_note(item: dict[str, Any]) -> dict[str, Any]:
+def normalize_note(
+    item: dict[str, Any],
+    *,
+    raw_source: Literal["listing", "detail"] = "listing",
+) -> dict[str, Any]:
     if isinstance(item.get("note_card"), dict):
         card = item["note_card"]
     elif isinstance(item.get("note"), dict):
@@ -174,17 +218,20 @@ def normalize_note(item: dict[str, Any]) -> dict[str, Any]:
     note_id = _text(
         item.get("id")
         or item.get("note_id")
+        or item.get("noteId")
         or card.get("id")
         or card.get("note_id")
+        or card.get("noteId")
     )
     images = (
         card.get("images_list")
         or card.get("image_list")
+        or card.get("imageList")
         or card.get("cover")
         or item.get("cover")
     )
     tags = []
-    for tag in card.get("tag_list") or card.get("tags") or []:
+    for tag in card.get("tag_list") or card.get("tagList") or card.get("tags") or []:
         name = _text(tag.get("name")) if isinstance(tag, dict) else _text(tag)
         if name and name not in tags:
             tags.append(name)
@@ -195,7 +242,25 @@ def normalize_note(item: dict[str, Any]) -> dict[str, Any]:
         or card.get("publish_time")
         or item.get("create_time")
     )
-    share_info = card.get("share_info") if isinstance(card.get("share_info"), dict) else {}
+    share_value = card.get("share_info") or card.get("shareInfo")
+    share_info = share_value if isinstance(share_value, dict) else {}
+    user = card.get("user") if isinstance(card.get("user"), dict) else {}
+    video = card.get("video") if isinstance(card.get("video"), dict) else {}
+    source_data = {
+        "xsec_token": _text(
+            item.get("xsec_token") or item.get("xsecToken")
+            or card.get("xsec_token") or card.get("xsecToken")
+            or share_info.get("xsec_token") or share_info.get("xsecToken")
+        ),
+        "cursor": _text(item.get("cursor") or card.get("cursor")),
+        "image_urls": _image_urls(images),
+        "video": video,
+        "video_url": _video_url(video),
+        "author": user,
+        "ip_location": _text(card.get("ip_location") or card.get("ipLocation")),
+        "last_update_time": card.get("last_update_time") or card.get("lastUpdateTime"),
+        f"raw_{raw_source}": item,
+    }
     return {
         "xhs_note_id": note_id,
         "title": _text(card.get("display_title") or card.get("title"))[:500],
@@ -204,16 +269,13 @@ def normalize_note(item: dict[str, Any]) -> dict[str, Any]:
         "source_url": f"https://www.xiaohongshu.com/explore/{note_id}" if note_id else "",
         "note_type": _text(card.get("type") or "normal")[:30],
         "is_private": _text(corner.get("type") or card.get("privacy_status")).lower() == "private",
-        "liked_count": _interaction_value(card, "liked_count", "likes", "nice_count"),
-        "collected_count": _interaction_value(card, "collected_count", "infavs", "collected"),
-        "comment_count": _interaction_value(card, "comment_count", "comments_count", "comments"),
-        "share_count": _interaction_value(card, "share_count", "shares"),
+        "liked_count": _interaction_value(card, "liked_count", "likedCount", "likes", "nice_count", "niceCount"),
+        "collected_count": _interaction_value(card, "collected_count", "collectedCount", "infavs", "collected"),
+        "comment_count": _interaction_value(card, "comment_count", "commentCount", "comments_count", "comments"),
+        "share_count": _interaction_value(card, "share_count", "shareCount", "shares"),
         "tags": tags[:30],
         "published_at": _timestamp(created),
-        "source_data": {
-            "xsec_token": _text(item.get("xsec_token") or card.get("xsec_token") or share_info.get("xsec_token")),
-            "cursor": _text(item.get("cursor") or card.get("cursor")),
-        },
+        "source_data": source_data,
     }
 
 
@@ -237,6 +299,11 @@ def merge_note_detail(
         **(listing.get("source_data") if isinstance(listing.get("source_data"), dict) else {}),
         **(detail.get("source_data") if isinstance(detail.get("source_data"), dict) else {}),
     }
+    if merged["source_data"].get("raw_detail"):
+        merged["source_data"]["detail_fetched_at"] = (
+            datetime.now(timezone.utc).replace(tzinfo=None).isoformat()
+        )
+        merged["source_data"].pop("detail_error", None)
     return merged
 
 
@@ -262,7 +329,9 @@ def _extract_note_items(data: dict[str, Any]) -> list[dict[str, Any]]:
             value = container.get(key)
             if isinstance(value, dict):
                 return [value]
-        if any(key in container for key in ("note_id", "display_title", "interact_info")):
+        if any(key in container for key in (
+            "note_id", "noteId", "display_title", "interact_info", "interactInfo",
+        )):
             return [container]
     return []
 
@@ -408,7 +477,7 @@ async def resolve_cli_user_id(identifier: str) -> str:
     return _select_candidate(identifier, _search_candidates(data))
 
 
-async def _cli_note_detail(note: dict[str, Any]) -> dict[str, Any]:
+async def fetch_cli_note_detail(note: dict[str, Any]) -> dict[str, Any]:
     token = _text(note.get("source_data", {}).get("xsec_token"))
     target = note["xhs_note_id"]
     if token:
@@ -419,8 +488,8 @@ async def _cli_note_detail(note: dict[str, Any]) -> dict[str, Any]:
     data = await run_xhs_command("read", target, timeout_seconds=45)
     items = _extract_note_items(data)
     if not items:
-        return note
-    detail = normalize_note(items[0])
+        raise HTTPException(status_code=502, detail="帖子详情返回为空")
+    detail = normalize_note(items[0], raw_source="detail")
     if not detail["xhs_note_id"]:
         detail["xhs_note_id"] = note["xhs_note_id"]
     return merge_note_detail(note, detail)
@@ -433,10 +502,13 @@ def _detail_candidates(notes: list[dict[str, Any]], limit: int) -> list[dict[str
     ranked = sorted(
         public,
         key=lambda note: (
-            note["liked_count"] + note["collected_count"]
-            + note["comment_count"] * 2 + note["share_count"] * 2
+            bool(str(note.get("content") or "").strip()),
+            -(
+                note["liked_count"] + note["collected_count"]
+                + note["comment_count"] * 2 + note["share_count"] * 2
+            ),
         ),
-        reverse=True,
+        reverse=False,
     )
     selected: list[dict[str, Any]] = []
     seen: set[str] = set()
@@ -455,6 +527,7 @@ async def sync_with_cli(
     max_pages: int,
     detail_notes: int | None = None,
     published_since: datetime | None = None,
+    page_callback: SyncPageCallback | None = None,
 ) -> dict[str, Any]:
     user_id = await resolve_cli_user_id(identifier)
     profile_data = await run_xhs_command("user", user_id, timeout_seconds=45)
@@ -488,6 +561,13 @@ async def sync_with_cli(
         next_cursor = _text(page.get("cursor"))
         has_more = bool(page.get("has_more") and raw_notes and next_cursor and next_cursor != cursor)
         cutoff_reached = _page_reaches_cutoff(page_notes, published_since)
+        if page_callback:
+            await page_callback(page_notes, {
+                "pages_fetched": pages_fetched,
+                "has_more": has_more,
+                "cursor": next_cursor,
+                "cutoff_reached": cutoff_reached,
+            })
         if cutoff_reached:
             break
         if not has_more:
@@ -509,7 +589,7 @@ async def sync_with_cli(
     details = _detail_candidates(notes, detail_limit)
     for note in details:
         try:
-            notes_by_id[note["xhs_note_id"]] = await _cli_note_detail(note)
+            notes_by_id[note["xhs_note_id"]] = await fetch_cli_note_detail(note)
         except HTTPException:
             warnings.append(f"《{note['title'] or note['xhs_note_id']}》正文读取失败，仅保留标题和互动数据")
         await asyncio.sleep(request_delay)
@@ -593,7 +673,7 @@ async def _tikhub_note_detail(
     items = _extract_note_items(data)
     if not items:
         return note
-    detail = normalize_note(items[0])
+    detail = normalize_note(items[0], raw_source="detail")
     if not detail["xhs_note_id"]:
         detail["xhs_note_id"] = note["xhs_note_id"]
     return merge_note_detail(note, detail)

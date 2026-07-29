@@ -1,6 +1,7 @@
 "use client"
 
 import { FormEvent, useDeferredValue, useEffect, useMemo, useState } from "react"
+import Image from "next/image"
 import Link from "next/link"
 import {
   AlertCircle,
@@ -9,6 +10,7 @@ import {
   FilePenLine,
   FileText,
   History,
+  Images,
   ListChecks,
   LoaderCircle,
   Maximize2,
@@ -28,6 +30,7 @@ import {
 import { AiImageWorkspace } from "@/components/AiImageWorkspace"
 import { AiMarkdown } from "@/components/AiMarkdown"
 import { AiDraftWorkspace, AiPlanWorkspace } from "@/components/AiWritingWorkspace"
+import { CreatorPostGallery } from "@/components/CreatorPostGallery"
 import { Header } from "@/components/Header"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
@@ -53,6 +56,7 @@ import {
   generateAiImage,
   generateAiWritingPlan,
   getAiStatus,
+  getCreatorAccountNotes,
   getCreatorAccounts,
   getCreation,
   getMaterial,
@@ -64,6 +68,7 @@ import {
   updateCreation,
   type Creation,
   type CreatorAccount,
+  type CreatorAccountSampleNote,
   type AiMessage,
   type AiImageMessage,
   type AiImageThread,
@@ -95,6 +100,7 @@ const MATERIAL_FILTERS: { value: "all" | MaterialScope; label: string }[] = [
 ]
 
 const MAX_IMAGE_REFERENCES = 8
+const MAX_CREATOR_NOTE_REFERENCES = 20
 type WritingWorkspaceMode = "chat" | "plan" | "draft"
 
 function createEmptyDraft(): AiDraft {
@@ -145,6 +151,7 @@ function cleanAiMessages(messages: AiMessage[] | null | undefined): AiMessage[] 
 function createWorkspaceSnapshot({
   task,
   selectedCreatorAccountId,
+  selectedCreatorNotes,
   messages,
   input,
   selectedMaterialIds,
@@ -160,6 +167,7 @@ function createWorkspaceSnapshot({
 }: {
   task: AiTask
   selectedCreatorAccountId: string
+  selectedCreatorNotes: CreatorAccountSampleNote[]
   messages: AiMessage[]
   input: string
   selectedMaterialIds: string[]
@@ -176,6 +184,8 @@ function createWorkspaceSnapshot({
   return JSON.stringify({
     task,
     creator_account_id: selectedCreatorAccountId,
+    selected_creator_note_ids: selectedCreatorNotes.map((note) => note.id),
+    selected_creator_notes: selectedCreatorNotes,
     messages,
     input,
     selected_material_ids: selectedMaterialIds,
@@ -214,6 +224,10 @@ export default function AiStudioPage() {
   const [status, setStatus] = useState<AiStatus | null>(null)
   const [creatorAccounts, setCreatorAccounts] = useState<CreatorAccount[]>([])
   const [selectedCreatorAccountId, setSelectedCreatorAccountId] = useState("")
+  const [creatorNotes, setCreatorNotes] = useState<CreatorAccountSampleNote[]>([])
+  const [creatorNotesLoading, setCreatorNotesLoading] = useState(false)
+  const [creatorNoteSearch, setCreatorNoteSearch] = useState("")
+  const [selectedCreatorNotes, setSelectedCreatorNotes] = useState<CreatorAccountSampleNote[]>([])
   const [vehicles, setVehicles] = useState<VehicleOption[]>([])
   const [scopeFilter, setScopeFilter] = useState<"all" | MaterialScope>("all")
   const [materialSearch, setMaterialSearch] = useState("")
@@ -238,7 +252,6 @@ export default function AiStudioPage() {
   const [activeWritingPlanId, setActiveWritingPlanId] = useState<string | null>(null)
   const [draft, setDraft] = useState<AiDraft>(() => createEmptyDraft())
   const [writingWorkspaceMode, setWritingWorkspaceMode] = useState<WritingWorkspaceMode>("chat")
-  const [generatingDraft, setGeneratingDraft] = useState(false)
   const [exportingPackage, setExportingPackage] = useState(false)
   const [copyNotice, setCopyNotice] = useState("")
   const [noteTitle, setNoteTitle] = useState("")
@@ -252,7 +265,9 @@ export default function AiStudioPage() {
   const [feedbackSaving, setFeedbackSaving] = useState(false)
   const [feedbackSent, setFeedbackSent] = useState(false)
   const [textWorkspaceOpen, setTextWorkspaceOpen] = useState(false)
+  const [creatorPostGalleryOpen, setCreatorPostGalleryOpen] = useState(false)
   const deferredSearch = useDeferredValue(materialSearch)
+  const deferredCreatorNoteSearch = useDeferredValue(creatorNoteSearch)
 
   useEffect(() => {
     let active = true
@@ -280,6 +295,7 @@ export default function AiStudioPage() {
       .then(async (creation) => {
         const conversation = creation.ai_conversation
         const restoredMessages = cleanAiMessages(conversation.messages)
+        const restoredCreatorNotes = conversation.selected_creator_notes || []
 
         const selectedResults = await Promise.allSettled(
           conversation.selected_material_ids.map((id) => getMaterial(id))
@@ -327,7 +343,9 @@ export default function AiStudioPage() {
         setResumedCreationId(creation.id)
         setResumedTitle(creation.title)
         setTask(conversation.task)
+        setCreatorNotesLoading(Boolean(conversation.creator_account_id))
         setSelectedCreatorAccountId(conversation.creator_account_id || "")
+        setSelectedCreatorNotes(restoredCreatorNotes)
         setMessages(restoredMessages)
         setSelectedMaterials(restoredMaterials)
         setScopeFilter(conversation.scope_filter || "all")
@@ -354,6 +372,7 @@ export default function AiStudioPage() {
         setSavedWorkspaceSnapshot(createWorkspaceSnapshot({
           task: conversation.task,
           selectedCreatorAccountId: conversation.creator_account_id || "",
+          selectedCreatorNotes: restoredCreatorNotes,
           messages: restoredMessages,
           input: "",
           selectedMaterialIds: restoredMaterials.map((material) => material.id),
@@ -385,7 +404,7 @@ export default function AiStudioPage() {
       brand: selectedBrand || undefined,
       car_model: selectedCarModel || undefined,
       page: 1,
-      page_size: 100,
+      page_size: 500,
       sort: "created_at",
       order: "desc",
     })
@@ -406,6 +425,35 @@ export default function AiStudioPage() {
     }
   }, [deferredSearch, scopeFilter, selectedBrand, selectedCarModel])
 
+  useEffect(() => {
+    if (!selectedCreatorAccountId) return
+
+    let active = true
+    getCreatorAccountNotes(selectedCreatorAccountId, {
+      q: deferredCreatorNoteSearch.trim() || undefined,
+      sort: "engagement",
+      page_size: 500,
+    })
+      .then((result) => {
+        if (!active) return
+        setCreatorNotes(result.items)
+        setSelectedCreatorNotes((current) => current.map((selected) => (
+          result.items.find((note) => note.id === selected.id) ?? selected
+        )))
+      })
+      .catch((error) => {
+        if (!active) return
+        setCreatorNotes([])
+        setChatError(error instanceof Error ? error.message : "账号旧帖加载失败")
+      })
+      .finally(() => {
+        if (active) setCreatorNotesLoading(false)
+      })
+    return () => {
+      active = false
+    }
+  }, [deferredCreatorNoteSearch, selectedCreatorAccountId])
+
   const brands = useMemo(
     () => Array.from(new Set(vehicles.map((vehicle) => vehicle.brand))),
     [vehicles]
@@ -419,6 +467,10 @@ export default function AiStudioPage() {
   const selectedMaterialIds = useMemo(
     () => selectedMaterials.map((material) => material.id),
     [selectedMaterials]
+  )
+  const selectedCreatorNoteIds = useMemo(
+    () => selectedCreatorNotes.map((note) => note.id),
+    [selectedCreatorNotes]
   )
   const selectedCreatorAccount = useMemo(
     () => creatorAccounts.find((account) => account.id === selectedCreatorAccountId) ?? null,
@@ -435,6 +487,17 @@ export default function AiStudioPage() {
       })
       .map((attachment) => ({ attachment, label: material.title })))
   }, [selectedMaterials])
+  const selectedCreatorNoteImages = useMemo(() => {
+    const seen = new Set<string>()
+    return selectedCreatorNotes.flatMap((note) => (note.attachments ?? [])
+      .filter(isImageAttachment)
+      .filter((attachment) => {
+        if (seen.has(attachment.path)) return false
+        seen.add(attachment.path)
+        return true
+      })
+      .map((attachment) => ({ attachment, label: note.title || "账号旧帖" })))
+  }, [selectedCreatorNotes])
   const activeImageThread = useMemo(
     () => imageThreads.find((thread) => thread.id === activeImageThreadId) ?? imageThreads[0],
     [activeImageThreadId, imageThreads]
@@ -463,6 +526,7 @@ export default function AiStudioPage() {
   const historicalReferenceImages = useMemo(() => {
     const visiblePaths = new Set([
       ...selectedMaterialImages.map(({ attachment }) => attachment.path),
+      ...selectedCreatorNoteImages.map(({ attachment }) => attachment.path),
       ...uploadedReferenceImages.map((attachment) => attachment.path),
       ...generatedImages.map((attachment) => attachment.path),
     ])
@@ -474,7 +538,7 @@ export default function AiStudioPage() {
       .filter((attachment) => !visiblePaths.has(attachment.path))
       .map((attachment) => [attachment.path, { attachment, label: "历史参考" }])
     ).values())
-  }, [generatedImages, imageThreads, selectedMaterialImages, uploadedReferenceImages])
+  }, [generatedImages, imageThreads, selectedCreatorNoteImages, selectedMaterialImages, uploadedReferenceImages])
   const latestAssistant = useMemo(
     () => messages.slice().reverse().find((message) => message.role === "assistant" && message.content)?.content ?? "",
     [messages]
@@ -495,6 +559,7 @@ export default function AiStudioPage() {
   const workspaceSnapshot = useMemo(() => createWorkspaceSnapshot({
     task,
     selectedCreatorAccountId,
+    selectedCreatorNotes,
     messages,
     input,
     selectedMaterialIds,
@@ -510,6 +575,7 @@ export default function AiStudioPage() {
   }), [
     task,
     selectedCreatorAccountId,
+    selectedCreatorNotes,
     messages,
     input,
     selectedMaterialIds,
@@ -527,6 +593,7 @@ export default function AiStudioPage() {
     input.trim()
     || messages.some((message) => message.content.trim())
     || selectedMaterialIds.length
+    || selectedCreatorNoteIds.length
     || writingPlans.length
     || draft.title.trim()
     || draft.content.trim()
@@ -598,6 +665,47 @@ export default function AiStudioPage() {
     setImageThreads((current) => current.map((thread) =>
       thread.id === threadId ? updater(thread) : thread
     ))
+  }
+
+  const toggleCreatorNote = (note: CreatorAccountSampleNote) => {
+    const selected = selectedCreatorNoteIds.includes(note.id)
+    if (!selected && selectedCreatorNotes.length >= MAX_CREATOR_NOTE_REFERENCES) {
+      setChatError(`每轮最多选择 ${MAX_CREATOR_NOTE_REFERENCES} 篇账号旧帖`)
+      return
+    }
+    setChatError("")
+    setSelectedCreatorNotes((current) => selected
+      ? current.filter((item) => item.id !== note.id)
+      : [...current, note]
+    )
+    if (activeImageThread) {
+      const noteImages = (note.attachments ?? []).filter(isImageAttachment)
+      const noteImagePaths = new Set(noteImages.map((attachment) => attachment.path))
+      const firstImage = noteImages[0]
+      if (selected && noteImagePaths.size > 0) {
+        updateImageThread(activeImageThread.id, (thread) => ({
+          ...thread,
+          selected_references: thread.selected_references.filter(
+            (reference) => !noteImagePaths.has(reference.path)
+          ),
+          updated_at: new Date().toISOString(),
+        }))
+      } else if (
+        firstImage
+        && !activeImageThread.selected_references.some((reference) => reference.path === firstImage.path)
+      ) {
+        if (activeImageThread.selected_references.length < MAX_IMAGE_REFERENCES) {
+          updateImageThread(activeImageThread.id, (thread) => ({
+            ...thread,
+            selected_references: [...thread.selected_references, firstImage],
+            updated_at: new Date().toISOString(),
+          }))
+        } else {
+          setChatError(`旧帖已选中；当前图片对话最多使用 ${MAX_IMAGE_REFERENCES} 张参考图`)
+        }
+      }
+    }
+    setSavedCreation(null)
   }
 
   const handleImagePromptChange = (value: string) => {
@@ -703,6 +811,7 @@ export default function AiStudioPage() {
         brand: selectedBrand,
         car_model: selectedCarModel,
         material_ids: selectedMaterialIds,
+        creator_note_ids: selectedCreatorNoteIds,
         messages: nextMessages,
       }
       if (task === "concept" || task === "title") {
@@ -770,8 +879,8 @@ export default function AiStudioPage() {
     }))
   }
 
-  const handleDevelopDraft = async () => {
-    if (!activeWritingPlan || !activeWritingPlan.selected_title_id || generatingDraft || streaming) return
+  const handleDevelopDraft = () => {
+    if (!activeWritingPlan || !activeWritingPlan.selected_title_id || streaming) return
     const selectedTitle = activeWritingPlan.titles.find(
       (title) => title.id === activeWritingPlan.selected_title_id
     )
@@ -780,79 +889,42 @@ export default function AiStudioPage() {
     )
     if (!selectedTitle || selectedDirections.length === 0) return
 
-    const previousDraft = draft
     const userContent = [
-      `采用标题：${selectedTitle.text}`,
-      `采用内容方向：${selectedDirections.map((direction) => direction.name).join("、")}`,
-      "请根据已选素材和前面的想法写出一篇完整的小红书正文。不要重复输出标题，不要写创作说明，不得编造素材中没有的事实。",
+      "我采用下面的创作方案。接下来先围绕这个方向和我继续讨论，不要直接输出完整正文。",
+      `标题：${selectedTitle.text}`,
+      `内容方向：${selectedDirections.map((direction) => direction.name).join("、")}`,
       ...selectedDirections.map((direction) => [
         `方向“${direction.name}”：${direction.summary}`,
         `建议开头：${direction.opening}`,
         `结构：${direction.outline.join(" → ")}`,
       ].join("\n")),
+      "请先帮我确认切入角度、素材取舍、卖点表达和仍需补充的信息。只有当我明确说“生成终稿”或“写完整正文”时，再输出完整笔记。",
     ].join("\n\n")
-    const nextMessages: AiMessage[] = [...messages, { role: "user", content: userContent }]
-    const assistantIndex = nextMessages.length
-    setMessages([...nextMessages, { role: "assistant", content: "" }])
+    const assistantContent = [
+      "已采用这个标题和内容方向，先不生成终稿。",
+      "接下来可以继续确认切入角度、素材取舍、卖点表达和语气。告诉我想先打磨哪一项，或明确说“生成终稿”。",
+    ].join("\n\n")
+    setMessages([
+      ...messages,
+      { role: "user", content: userContent },
+      { role: "assistant", content: assistantContent },
+    ])
     setTask("note")
-    setWritingWorkspaceMode("draft")
-    setGeneratingDraft(true)
-    setStreaming(true)
+    setWritingWorkspaceMode("chat")
     setChatError("")
     setSavedCreation(null)
+    setFeedbackChoice(null)
+    setFeedbackComment("")
+    setFeedbackSent(false)
     setNoteTitle(selectedTitle.text)
-    setDraft({
-      ...previousDraft,
+    setDraft((current) => ({
+      ...current,
       title: selectedTitle.text,
-      content: "",
       selected_plan_id: activeWritingPlan.id,
       selected_title_id: selectedTitle.id,
       selected_direction_ids: activeWritingPlan.selected_direction_ids,
-      versions: previousDraft.content.trim()
-        ? [...previousDraft.versions, createDraftVersion(previousDraft, "生成新稿前")]
-        : previousDraft.versions,
       updated_at: new Date().toISOString(),
-    })
-    let fullResponse = ""
-
-    try {
-      await streamAiChat(
-        {
-          task: "note",
-          creator_account_id: selectedCreatorAccountId || undefined,
-          brand: selectedBrand,
-          car_model: selectedCarModel,
-          material_ids: selectedMaterialIds,
-          messages: nextMessages,
-        },
-        (delta) => {
-          fullResponse += delta
-          setMessages((current) => current.map((message, index) =>
-            index === assistantIndex ? { role: "assistant", content: fullResponse } : message
-          ))
-          setDraft((current) => ({
-            ...current,
-            content: fullResponse,
-            updated_at: new Date().toISOString(),
-          }))
-        },
-        setChatError,
-      )
-      setDraft((current) => ({
-        ...current,
-        versions: fullResponse.trim()
-          ? [...current.versions, createDraftVersion({ ...current, content: fullResponse }, "AI 初稿")]
-          : current.versions,
-        updated_at: new Date().toISOString(),
-      }))
-    } catch (error) {
-      setMessages((current) => current.filter((_, index) => index !== assistantIndex))
-      setDraft(previousDraft)
-      setChatError(error instanceof Error ? error.message : "AI 正文生成失败")
-    } finally {
-      setGeneratingDraft(false)
-      setStreaming(false)
-    }
+    }))
   }
 
   const updateDraftField = (field: "title" | "content", value: string) => {
@@ -975,6 +1047,8 @@ export default function AiStudioPage() {
         brand: selectedBrand,
         car_model: selectedCarModel,
         material_ids: selectedMaterialIds,
+        creator_account_id: selectedCreatorAccountId,
+        creator_note_ids: selectedCreatorNoteIds,
       })
       const attachment = result.attachment
       const persistedReferences = result.reference_attachments?.length
@@ -1044,9 +1118,11 @@ export default function AiStudioPage() {
     const title = draft.title.trim() || noteTitle.trim() || deriveTitle(savedContent, selectedCarModel)
     const activeReference = activeImageThread?.selected_references[0] ?? null
     const conversation = {
-      version: 4 as const,
+      version: 5 as const,
       task,
       creator_account_id: selectedCreatorAccountId || null,
+      selected_creator_note_ids: selectedCreatorNoteIds,
+      selected_creator_notes: selectedCreatorNotes,
       messages: messagesToSave,
       selected_material_ids: selectedMaterialIds,
       scope_filter: scopeFilter,
@@ -1111,6 +1187,7 @@ export default function AiStudioPage() {
       setSavedWorkspaceSnapshot(createWorkspaceSnapshot({
         task,
         selectedCreatorAccountId,
+        selectedCreatorNotes,
         messages: messagesToSave,
         input,
         selectedMaterialIds,
@@ -1168,6 +1245,11 @@ export default function AiStudioPage() {
 
     setTask("concept")
     setSelectedCreatorAccountId("")
+    setCreatorNotes([])
+    setCreatorNotesLoading(false)
+    setCreatorNoteSearch("")
+    setSelectedCreatorNotes([])
+    setCreatorPostGalleryOpen(false)
     setMessages([])
     setInput("")
     setSelectedMaterials([])
@@ -1185,7 +1267,6 @@ export default function AiStudioPage() {
     setActiveWritingPlanId(null)
     setDraft(createEmptyDraft())
     setWritingWorkspaceMode("chat")
-    setGeneratingDraft(false)
     setExportingPackage(false)
     setCopyNotice("")
     setNoteTitle("")
@@ -1210,7 +1291,8 @@ export default function AiStudioPage() {
             <h2 className="text-sm font-semibold">专注 AI 对话</h2>
             <p className="truncate text-xs text-muted-foreground">
               {selectedCreatorAccount ? `${selectedCreatorAccount.name} · ` : ""}
-              {selectedMaterialIds.length} 条参考素材{selectedCarModel ? ` · ${selectedCarModel}` : ""}
+              {selectedMaterialIds.length} 条素材 · {selectedCreatorNoteIds.length} 篇账号旧帖
+              {selectedCarModel ? ` · ${selectedCarModel}` : ""}
             </p>
           </div>
         </div>
@@ -1380,12 +1462,34 @@ export default function AiStudioPage() {
           <p className="mt-2 text-xs text-muted-foreground">
             {selectedCreatorAccount ? `${selectedCreatorAccount.name} · ` : ""}
             {selectedBrand && selectedCarModel ? `${selectedBrand} · ${selectedCarModel} · ` : ""}
-            {selectedMaterialIds.length} 条参考素材
+            {selectedMaterialIds.length} 条素材 · {selectedCreatorNoteIds.length} 篇账号旧帖
           </p>
         </form>
       </div>
     </div>
   )
+
+  if (creatorPostGalleryOpen && selectedCreatorAccount) {
+    return (
+      <div className="min-h-screen">
+        <Header showActions={false} />
+        <CreatorPostGallery
+          accountName={selectedCreatorAccount.name}
+          notes={creatorNotes}
+          selectedNotes={selectedCreatorNotes}
+          loading={creatorNotesLoading}
+          search={creatorNoteSearch}
+          maxSelected={MAX_CREATOR_NOTE_REFERENCES}
+          onSearchChange={(value) => {
+            setCreatorNotesLoading(true)
+            setCreatorNoteSearch(value)
+          }}
+          onToggle={toggleCreatorNote}
+          onBack={() => setCreatorPostGalleryOpen(false)}
+        />
+      </div>
+    )
+  }
 
   return (
     <div className="min-h-screen">
@@ -1442,7 +1546,15 @@ export default function AiStudioPage() {
             <Select
               value={selectedCreatorAccountId || "__none__"}
               onValueChange={(value) => {
-                setSelectedCreatorAccountId(value === "__none__" ? "" : value)
+                const nextAccountId = value === "__none__" ? "" : value
+                if (nextAccountId !== selectedCreatorAccountId) {
+                  setCreatorNotes([])
+                  setCreatorNotesLoading(Boolean(nextAccountId))
+                  setCreatorNoteSearch("")
+                  setSelectedCreatorNotes([])
+                  setCreatorPostGalleryOpen(false)
+                }
+                setSelectedCreatorAccountId(nextAccountId)
                 setSavedCreation(null)
               }}
               disabled={creatorAccounts.length === 0}
@@ -1466,6 +1578,11 @@ export default function AiStudioPage() {
               <div className="flex flex-wrap items-center gap-2">
                 <span className="text-sm font-medium">{selectedCreatorAccount.name}</span>
                 <Badge variant="outline">{selectedCreatorAccount.analysis.sample_count || 0} 篇样本</Badge>
+                <Badge variant="outline">
+                  {selectedCreatorAccount.analysis.history_archive?.total_notes
+                    ?? selectedCreatorAccount.synced_note_count
+                    ?? 0} 篇旧帖
+                </Badge>
                 {selectedCreatorAccount.content_pillars.slice(0, 3).map((pillar) => (
                   <Badge key={pillar} variant="secondary">{pillar}</Badge>
                 ))}
@@ -1493,6 +1610,74 @@ export default function AiStudioPage() {
               </h2>
             </div>
             <div className="space-y-4 p-4">
+              {selectedCreatorAccount && (
+                <section className="space-y-3 border-b pb-4" aria-labelledby="creator-note-reference-heading">
+                  <div className="flex items-center justify-between gap-2">
+                    <span id="creator-note-reference-heading" className="text-xs font-medium text-muted-foreground">
+                      账号旧帖
+                    </span>
+                    <span className="text-xs text-muted-foreground">
+                      已选 {selectedCreatorNoteIds.length}/{MAX_CREATOR_NOTE_REFERENCES}
+                    </span>
+                  </div>
+
+                  <Button
+                    type="button"
+                    variant="outline"
+                    className="w-full justify-between bg-background px-3"
+                    onClick={() => {
+                      window.scrollTo(0, 0)
+                      setCreatorPostGalleryOpen(true)
+                    }}
+                  >
+                    <span className="flex items-center gap-2">
+                      <Images className="size-4" />
+                      浏览旧帖图库
+                    </span>
+                    <Badge variant="secondary">{creatorNotes.length}</Badge>
+                  </Button>
+
+                  {creatorNotesLoading && (
+                    <div className="flex items-center gap-2 text-xs text-muted-foreground">
+                      <LoaderCircle className="size-3.5 animate-spin" />
+                      正在加载旧帖
+                    </div>
+                  )}
+
+                  {selectedCreatorNotes.length > 0 && (
+                    <div className="max-h-44 space-y-1.5 overflow-y-auto pr-1">
+                      {selectedCreatorNotes.map((note) => {
+                        const cover = (note.attachments ?? []).find(isImageAttachment)?.path || note.cover_url
+                        return (
+                          <div key={note.id} className="flex items-center gap-2 rounded-md bg-muted/60 p-1.5 text-xs">
+                            <div className="relative size-10 shrink-0 overflow-hidden rounded bg-muted">
+                              {cover ? (
+                                <Image src={cover} alt="" fill sizes="40px" className="object-cover" unoptimized />
+                              ) : (
+                                <Images className="absolute inset-0 m-auto size-4 text-muted-foreground" />
+                              )}
+                            </div>
+                            <span className="line-clamp-2 min-w-0 flex-1 leading-4">{note.title || "无标题笔记"}</span>
+                            <button
+                              type="button"
+                              onClick={() => toggleCreatorNote(note)}
+                              className="grid size-6 shrink-0 place-items-center rounded-sm text-muted-foreground hover:bg-background hover:text-foreground"
+                              aria-label={`移除旧帖 ${note.title || "无标题笔记"}`}
+                              title="移除"
+                            >
+                              <X className="size-3.5" />
+                            </button>
+                          </div>
+                        )
+                      })}
+                    </div>
+                  )}
+                  {!creatorNotesLoading && creatorNotes.length === 0 && (
+                    <p className="text-xs leading-5 text-muted-foreground">该账号还没有可用的历史帖子</p>
+                  )}
+                </section>
+              )}
+
               <div className="grid grid-cols-3 gap-1 rounded-md bg-muted p-1" aria-label="素材范围">
                 {MATERIAL_FILTERS.map((filter) => (
                   <button
@@ -1679,7 +1864,6 @@ export default function AiStudioPage() {
                 <AiPlanWorkspace
                   plans={writingPlans}
                   activePlan={activeWritingPlan}
-                  generatingDraft={generatingDraft}
                   onSelectPlan={handleSelectWritingPlan}
                   onSelectTitle={handleSelectPlanTitle}
                   onToggleDirection={handleTogglePlanDirection}
@@ -1711,6 +1895,7 @@ export default function AiStudioPage() {
           <aside className="space-y-5 lg:col-span-2 xl:col-span-1" aria-label="生成与保存">
             <AiImageWorkspace
               selectedMaterialImages={selectedMaterialImages}
+              selectedCreatorNoteImages={selectedCreatorNoteImages}
               uploadedReferenceImages={uploadedReferenceSources}
               historicalReferenceImages={historicalReferenceImages}
               generatedImageSources={generatedImageSources}

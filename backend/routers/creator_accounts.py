@@ -1,15 +1,17 @@
+import asyncio
+import os
 import re
 from collections import Counter
-from datetime import datetime
-from typing import Any, Literal, Optional
+from datetime import datetime, timedelta
+from typing import Any, Awaitable, Callable, Literal, Optional
 from urllib.parse import urlparse
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
 from pydantic import BaseModel, Field, field_validator
 from sqlalchemy.orm import Session
 
 from backend.auth import get_current_user, require_account_query_operator, require_manager
-from backend.database import get_db
+from backend.database import SessionLocal, get_db
 from backend.models import (
     CreatorAccount,
     CreatorAccountNote,
@@ -17,16 +19,22 @@ from backend.models import (
     CreatorAccountSnapshot,
     User,
 )
+from backend.routers.xiaohongshu import UPLOAD_DIR, download_images, download_video
 from backend.xhs_public_data import (
     discover_public_accounts,
+    fetch_cli_note_detail,
+    normalize_note,
     public_source_status,
     sync_public_account,
+    sync_with_cli,
 )
 
 
 router = APIRouter(prefix="/api/creator-accounts", tags=["creator-accounts"])
 
 MAX_PROFILE_NOTES = 12
+HISTORY_ARCHIVE_MAX_PAGES = 1000
+ArchivePageCallback = Callable[[list[dict[str, Any]], dict[str, Any]], Awaitable[None]]
 AccountKind = Literal["owned", "competitor"]
 DataSource = Literal["auto", "cli", "tikhub"]
 
@@ -278,7 +286,110 @@ def build_basic_analysis(notes: list[dict[str, Any]], profile: dict[str, Any], w
     }
 
 
+def _local_attachments(source_data: dict[str, Any]) -> list[dict[str, Any]]:
+    values = source_data.get("local_attachments")
+    if not isinstance(values, list):
+        return []
+    return [
+        value for value in values
+        if isinstance(value, dict)
+        and isinstance(value.get("path"), str)
+        and value["path"].startswith("/uploads/")
+    ]
+
+
+def _local_attachment_exists(attachment: dict[str, Any]) -> bool:
+    relative_path = str(attachment.get("path") or "").removeprefix("/uploads/")
+    if not relative_path:
+        return False
+    filepath = (UPLOAD_DIR / relative_path).resolve()
+    try:
+        filepath.relative_to(UPLOAD_DIR.resolve())
+    except ValueError:
+        return False
+    return filepath.is_file() and filepath.stat().st_size > 0
+
+
+def _source_media_urls(source_data: dict[str, Any]) -> list[str]:
+    image_urls = [
+        str(url) for url in source_data.get("image_urls") or []
+        if isinstance(url, str) and url.startswith(("http://", "https://"))
+    ]
+    video_url = source_data.get("video_url")
+    if isinstance(video_url, str) and video_url.startswith(("http://", "https://")):
+        image_urls.append(video_url)
+    return image_urls
+
+
+def _note_media_is_complete(note: CreatorAccountNote) -> bool:
+    source_data = note.source_data if isinstance(note.source_data, dict) else {}
+    if not source_data.get("media_archived_at"):
+        return False
+    attachments = _local_attachments(source_data)
+    expected_urls = _source_media_urls(source_data)
+    return source_data.get("media_source_urls") == expected_urls and len(attachments) == len(expected_urls) and all(
+        _local_attachment_exists(attachment) for attachment in attachments
+    )
+
+
+def _merge_creator_note_source_data(
+    current: dict[str, Any],
+    incoming: dict[str, Any],
+) -> dict[str, Any]:
+    merged = {**current, **incoming}
+    current_has_detail = bool(current.get("raw_detail") or current.get("detail_fetched_at"))
+    incoming_has_detail = bool(incoming.get("raw_detail") or incoming.get("detail_fetched_at"))
+    if current_has_detail and not incoming_has_detail:
+        for key in ("image_urls", "video", "video_url", "raw_detail", "detail_fetched_at"):
+            if key in current:
+                merged[key] = current[key]
+    return merged
+
+
+def _restore_note_media_from_raw_detail(note: CreatorAccountNote) -> bool:
+    source_data = dict(note.source_data or {})
+    raw_detail = source_data.get("raw_detail")
+    if not isinstance(raw_detail, dict):
+        return False
+    recovered = normalize_note(raw_detail, raw_source="detail").get("source_data")
+    if not isinstance(recovered, dict):
+        return False
+
+    changed = False
+    recovered_images = recovered.get("image_urls")
+    current_images = source_data.get("image_urls")
+    if (
+        isinstance(recovered_images, list)
+        and recovered_images
+        and (
+            not isinstance(current_images, list)
+            or len(recovered_images) > len(current_images)
+        )
+    ):
+        source_data["image_urls"] = recovered_images
+        changed = True
+    for key in ("video", "video_url"):
+        if recovered.get(key) not in (None, "", [], {}) and recovered.get(key) != source_data.get(key):
+            source_data[key] = recovered[key]
+            changed = True
+    if changed:
+        note.source_data = source_data
+    return changed
+
+
 def creator_note_to_dict(note: CreatorAccountNote) -> dict[str, Any]:
+    source_data = note.source_data if isinstance(note.source_data, dict) else {}
+    image_urls = source_data.get("image_urls")
+    if not isinstance(image_urls, list):
+        image_urls = []
+    attachments = _local_attachments(source_data)
+    local_cover = next(
+        (
+            attachment.get("path") for attachment in attachments
+            if str(attachment.get("type") or "").startswith("image/")
+        ),
+        "",
+    )
     engagement_score = (
         note.liked_count + note.collected_count
         + note.comment_count * 2 + note.share_count * 2
@@ -287,7 +398,7 @@ def creator_note_to_dict(note: CreatorAccountNote) -> dict[str, Any]:
         "id": note.xhs_note_id,
         "title": note.title or "",
         "content": note.content or "",
-        "cover_url": note.cover_url or "",
+        "cover_url": local_cover or note.cover_url or "",
         "source_url": note.source_url or "",
         "note_type": note.note_type or "normal",
         "is_private": bool(note.is_private),
@@ -304,7 +415,492 @@ def creator_note_to_dict(note: CreatorAccountNote) -> dict[str, Any]:
         "published_at": note.published_at.isoformat() if note.published_at else None,
         "first_seen_at": note.first_seen_at.isoformat() if note.first_seen_at else None,
         "last_seen_at": note.last_seen_at.isoformat() if note.last_seen_at else None,
+        "image_count": len(image_urls),
+        "has_video": bool(source_data.get("video_url") or source_data.get("video")),
+        "detail_archived": bool(source_data.get("detail_fetched_at")),
+        "media_archived": _note_media_is_complete(note),
+        "attachments": attachments,
     }
+
+
+def _history_archive_summary(account: CreatorAccount, notes: list[CreatorAccountNote]) -> dict[str, Any]:
+    public_notes = [note for note in notes if not note.is_private]
+    body_note_count = sum(bool((note.content or "").strip()) for note in public_notes)
+    detail_note_count = sum(
+        bool((note.source_data or {}).get("detail_fetched_at"))
+        for note in public_notes
+        if isinstance(note.source_data, dict)
+    )
+    media_note_count = sum(_note_media_is_complete(note) for note in public_notes)
+    local_attachments = [
+        attachment
+        for note in public_notes
+        for attachment in _local_attachments(
+            note.source_data if isinstance(note.source_data, dict) else {}
+        )
+        if _local_attachment_exists(attachment)
+    ]
+    previous = (account.analysis or {}).get("history_archive")
+    status = previous if isinstance(previous, dict) else {}
+    return {
+        **status,
+        "total_notes": len(public_notes),
+        "body_note_count": body_note_count,
+        "missing_body_count": max(0, len(public_notes) - body_note_count),
+        "detail_note_count": detail_note_count,
+        "missing_detail_count": max(0, len(public_notes) - detail_note_count),
+        "media_note_count": media_note_count,
+        "missing_media_count": max(0, len(public_notes) - media_note_count),
+        "local_image_count": sum(
+            str(attachment.get("type") or "").startswith("image/")
+            for attachment in local_attachments
+        ),
+        "local_video_count": sum(
+            str(attachment.get("type") or "").startswith("video/")
+            for attachment in local_attachments
+        ),
+    }
+
+
+def _queue_owned_account_archive(
+    account: CreatorAccount,
+    db: Session,
+    background_tasks: BackgroundTasks,
+) -> None:
+    notes = db.query(CreatorAccountNote).filter(
+        CreatorAccountNote.creator_account_id == account.id,
+    ).all()
+    archive = _history_archive_summary(account, notes)
+    archive.update({
+        "status": "queued",
+        "source": "cli",
+        "stage": "listing",
+        "pages_fetched": 0,
+        "detail_completed": archive["detail_note_count"],
+        "detail_failed": 0,
+        "media_completed": archive["media_note_count"],
+        "media_failed": 0,
+        "started_at": datetime.utcnow().isoformat(),
+        "completed_at": None,
+        "last_progress_at": datetime.utcnow().isoformat(),
+        "error": None,
+    })
+    account.analysis = {**(account.analysis or {}), "history_archive": archive}
+    account.updated_at = datetime.utcnow()
+    db.commit()
+    db.refresh(account)
+    background_tasks.add_task(_archive_owned_account, account.id)
+
+
+def _archive_int_setting(name: str, default: int, minimum: int, maximum: int) -> int:
+    try:
+        value = int(os.getenv(name, str(default)))
+    except ValueError:
+        value = default
+    return max(minimum, min(value, maximum))
+
+
+def _archive_float_setting(name: str, default: float, minimum: float, maximum: float) -> float:
+    try:
+        value = float(os.getenv(name, str(default)))
+    except ValueError:
+        value = default
+    return max(minimum, min(value, maximum))
+
+
+def _creator_note_sync_payload(note: CreatorAccountNote) -> dict[str, Any]:
+    return {
+        "xhs_note_id": note.xhs_note_id,
+        "title": note.title or "",
+        "content": note.content or "",
+        "cover_url": note.cover_url or "",
+        "source_url": note.source_url or "",
+        "note_type": note.note_type or "normal",
+        "is_private": bool(note.is_private),
+        "liked_count": note.liked_count or 0,
+        "collected_count": note.collected_count or 0,
+        "comment_count": note.comment_count or 0,
+        "share_count": note.share_count or 0,
+        "tags": note.tags or [],
+        "source_data": dict(note.source_data or {}),
+        "published_at": note.published_at,
+    }
+
+
+def _update_archive_progress(
+    db: Session,
+    account: CreatorAccount,
+    **updates: Any,
+) -> dict[str, Any]:
+    db.flush()
+    notes = db.query(CreatorAccountNote).filter(
+        CreatorAccountNote.creator_account_id == account.id,
+    ).all()
+    archive = _history_archive_summary(account, notes)
+    archive.update(updates)
+    archive["last_progress_at"] = datetime.utcnow().isoformat()
+    account.synced_note_count = archive["total_notes"]
+    account.analysis = {
+        **(account.analysis or {}),
+        "synced_note_count": archive["total_notes"],
+        "public_note_count": archive["total_notes"],
+        "body_note_count": archive["body_note_count"],
+        "history_archive": archive,
+    }
+    account.updated_at = datetime.utcnow()
+    db.commit()
+    db.refresh(account)
+    return archive
+
+
+async def _fetch_archive_note_detail(
+    note: dict[str, Any],
+    retries: int,
+) -> tuple[dict[str, Any] | None, str | None]:
+    last_error = "帖子详情读取失败"
+    for attempt in range(1, retries + 1):
+        try:
+            return await fetch_cli_note_detail(note), None
+        except Exception as error:
+            last_error = str(getattr(error, "detail", error))[:1000]
+            if attempt < retries:
+                await asyncio.sleep(min(1.5 * attempt, 5.0))
+    return None, last_error
+
+
+async def _fetch_archive_note_media(
+    account_id: str,
+    note: dict[str, Any],
+    retries: int,
+) -> tuple[dict[str, Any], list[str]]:
+    source_data = dict(note.get("source_data") or {})
+    media_urls = _source_media_urls(source_data)
+    video_url = source_data.get("video_url")
+    if not isinstance(video_url, str) or video_url not in media_urls:
+        video_url = None
+    image_urls = media_urls[:-1] if video_url else media_urls
+    filename_prefix = f"creator-{account_id[:8]}-{note['xhs_note_id']}"
+    last_errors: list[str] = []
+
+    for attempt in range(1, retries + 1):
+        attachments, image_errors = await download_images(
+            image_urls,
+            filename_prefix=filename_prefix,
+        )
+        video_attachment, video_error = await download_video(
+            video_url,
+            filename_prefix=filename_prefix,
+        )
+        if video_attachment:
+            attachments.append(video_attachment)
+        errors = [*image_errors, *([video_error] if video_error else [])]
+        expected_count = len(image_urls) + bool(video_url)
+        complete = len(attachments) == expected_count and not errors
+        source_data["local_attachments"] = attachments
+        source_data["media_source_urls"] = media_urls
+        source_data["media_attempted_at"] = datetime.utcnow().isoformat()
+        source_data["media_errors"] = errors
+        if complete:
+            source_data["media_archived_at"] = datetime.utcnow().isoformat()
+            return source_data, []
+        source_data.pop("media_archived_at", None)
+        last_errors = errors or ["本地媒体数量与帖子详情不一致"]
+        if attempt < retries:
+            await asyncio.sleep(min(1.5 * attempt, 5.0))
+
+    return source_data, last_errors
+
+
+async def _archive_owned_account(account_id: str, *, resume: bool = False) -> None:
+    with SessionLocal() as db:
+        account = db.query(CreatorAccount).filter(CreatorAccount.id == account_id).first()
+        if not account:
+            return
+        previous_archive = (account.analysis or {}).get("history_archive")
+        resume_details = bool(
+            resume
+            and isinstance(previous_archive, dict)
+            and previous_archive.get("stage") in {"details", "media"}
+            and previous_archive.get("has_more") is False
+            and previous_archive.get("total_notes")
+        )
+        archive = _update_archive_progress(
+            db,
+            account,
+            status="running",
+            source="cli",
+            stage="details" if resume_details else "listing",
+            completed_at=None,
+            error=None,
+        )
+        try:
+            async def persist_page(
+                page_notes: list[dict[str, Any]],
+                progress: dict[str, Any],
+            ) -> None:
+                _upsert_account_notes(db, account, page_notes, datetime.utcnow())
+                _update_archive_progress(
+                    db,
+                    account,
+                    status="running",
+                    source="cli",
+                    stage="listing",
+                    pages_fetched=progress["pages_fetched"],
+                    has_more=progress["has_more"],
+                    error=None,
+                )
+
+            if resume_details:
+                synced = account
+            else:
+                synced = await sync_account(
+                    account,
+                    db,
+                    "cli",
+                    HISTORY_ARCHIVE_MAX_PAGES,
+                    detail_notes=0,
+                    page_callback=persist_page,
+                )
+            note_rows = db.query(CreatorAccountNote).filter(
+                CreatorAccountNote.creator_account_id == synced.id,
+                CreatorAccountNote.is_private == False,
+            ).order_by(
+                CreatorAccountNote.published_at.desc(),
+                CreatorAccountNote.first_seen_at.desc(),
+            ).all()
+            pending = [
+                _creator_note_sync_payload(note)
+                for note in note_rows
+                if not isinstance(note.source_data, dict)
+                or not note.source_data.get("detail_fetched_at")
+            ]
+            detail_total = len(note_rows)
+            detail_completed = detail_total - len(pending)
+            _update_archive_progress(
+                db,
+                synced,
+                status="running",
+                source="cli",
+                stage="details",
+                pages_fetched=(synced.analysis or {}).get("pages_fetched", 0),
+                detail_total=detail_total,
+                detail_completed=detail_completed,
+                detail_failed=0,
+                error=None,
+            )
+
+            concurrency = _archive_int_setting("XHS_ARCHIVE_DETAIL_CONCURRENCY", 2, 1, 5)
+            retries = _archive_int_setting("XHS_ARCHIVE_DETAIL_RETRIES", 2, 1, 4)
+            batch_delay = _archive_float_setting(
+                "XHS_ARCHIVE_DETAIL_BATCH_DELAY_SECONDS", 0.75, 0.2, 10.0,
+            )
+            detail_failed = 0
+            detail_errors: list[str] = []
+            for offset in range(0, len(pending), concurrency):
+                batch = pending[offset:offset + concurrency]
+                results = await asyncio.gather(*(
+                    _fetch_archive_note_detail(note, retries)
+                    for note in batch
+                ))
+                now = datetime.utcnow()
+                for candidate, (detail, error) in zip(batch, results):
+                    if detail:
+                        _upsert_account_notes(db, synced, [detail], now)
+                        detail_completed += 1
+                        continue
+                    detail_failed += 1
+                    if error and len(detail_errors) < 20:
+                        detail_errors.append(f"{candidate['xhs_note_id']}: {error}")
+                    row = db.query(CreatorAccountNote).filter(
+                        CreatorAccountNote.creator_account_id == synced.id,
+                        CreatorAccountNote.xhs_note_id == candidate["xhs_note_id"],
+                    ).first()
+                    if row:
+                        source_data = dict(row.source_data or {})
+                        source_data["detail_error"] = error
+                        source_data["detail_attempted_at"] = now.isoformat()
+                        row.source_data = source_data
+                        row.updated_at = now
+                _update_archive_progress(
+                    db,
+                    synced,
+                    status="running",
+                    source="cli",
+                    stage="details",
+                    detail_total=detail_total,
+                    detail_completed=detail_completed,
+                    detail_failed=detail_failed,
+                    detail_errors=detail_errors,
+                    error=None,
+                )
+                if offset + concurrency < len(pending):
+                    await asyncio.sleep(batch_delay)
+
+            media_rows = db.query(CreatorAccountNote).filter(
+                CreatorAccountNote.creator_account_id == synced.id,
+                CreatorAccountNote.is_private == False,
+            ).order_by(
+                CreatorAccountNote.published_at.desc(),
+                CreatorAccountNote.first_seen_at.desc(),
+            ).all()
+            for media_row in media_rows:
+                _restore_note_media_from_raw_detail(media_row)
+            media_pending = [
+                _creator_note_sync_payload(note)
+                for note in media_rows
+                if isinstance(note.source_data, dict)
+                and note.source_data.get("detail_fetched_at")
+                and not _note_media_is_complete(note)
+            ]
+            media_total = len(media_rows)
+            media_completed = sum(_note_media_is_complete(note) for note in media_rows)
+            _update_archive_progress(
+                db,
+                synced,
+                status="running",
+                source="cli",
+                stage="media",
+                media_total=media_total,
+                media_completed=media_completed,
+                media_failed=0,
+                error=None,
+            )
+
+            media_concurrency = _archive_int_setting("XHS_ARCHIVE_MEDIA_CONCURRENCY", 4, 1, 4)
+            media_retries = _archive_int_setting("XHS_ARCHIVE_MEDIA_RETRIES", 2, 1, 4)
+            media_batch_delay = _archive_float_setting(
+                "XHS_ARCHIVE_MEDIA_BATCH_DELAY_SECONDS", 0.2, 0.1, 10.0,
+            )
+            media_failed = 0
+            media_errors: list[str] = []
+            for offset in range(0, len(media_pending), media_concurrency):
+                batch = media_pending[offset:offset + media_concurrency]
+                results = await asyncio.gather(*(
+                    _fetch_archive_note_media(synced.id, note, media_retries)
+                    for note in batch
+                ))
+                now = datetime.utcnow()
+                for candidate, (source_data, errors) in zip(batch, results):
+                    row = db.query(CreatorAccountNote).filter(
+                        CreatorAccountNote.creator_account_id == synced.id,
+                        CreatorAccountNote.xhs_note_id == candidate["xhs_note_id"],
+                    ).first()
+                    if row:
+                        row.source_data = source_data
+                        row.updated_at = now
+                    if errors:
+                        media_failed += 1
+                        if len(media_errors) < 20:
+                            media_errors.append(
+                                f"{candidate['xhs_note_id']}: {'；'.join(errors)}"
+                            )
+                    else:
+                        media_completed += 1
+                _update_archive_progress(
+                    db,
+                    synced,
+                    status="running",
+                    source="cli",
+                    stage="media",
+                    media_total=media_total,
+                    media_completed=media_completed,
+                    media_failed=media_failed,
+                    media_errors=media_errors,
+                    error=None,
+                )
+                if offset + media_concurrency < len(media_pending):
+                    await asyncio.sleep(media_batch_delay)
+
+            notes = db.query(CreatorAccountNote).filter(
+                CreatorAccountNote.creator_account_id == synced.id,
+            ).order_by(
+                CreatorAccountNote.published_at.desc(),
+                CreatorAccountNote.first_seen_at.desc(),
+            ).all()
+            public_notes = [creator_note_to_dict(note) for note in notes if not note.is_private]
+            archive = _history_archive_summary(synced, notes)
+            page_limit_reached = bool((synced.analysis or {}).get("page_limit_reached"))
+            archive.update({
+                "status": (
+                    "complete"
+                    if not page_limit_reached
+                    and archive["missing_detail_count"] == 0
+                    and archive["missing_media_count"] == 0
+                    else "partial"
+                ),
+                "source": "cli",
+                "stage": "complete",
+                "pages_fetched": (synced.analysis or {}).get("pages_fetched", 0),
+                "has_more": bool((synced.analysis or {}).get("has_more")),
+                "page_limit_reached": page_limit_reached,
+                "detail_total": len(public_notes),
+                "detail_completed": archive["detail_note_count"],
+                "detail_failed": archive["missing_detail_count"],
+                "detail_errors": detail_errors,
+                "media_total": len(public_notes),
+                "media_completed": archive["media_note_count"],
+                "media_failed": archive["missing_media_count"],
+                "media_errors": media_errors,
+                "completed_at": datetime.utcnow().isoformat(),
+                "last_progress_at": datetime.utcnow().isoformat(),
+                "error": None,
+            })
+            previous_analysis = synced.analysis or {}
+            refreshed_analysis = {
+                **previous_analysis,
+                **build_basic_analysis(
+                    public_notes,
+                    synced.profile_data or {},
+                    previous_analysis.get("warnings") or [],
+                ),
+                "synced_note_count": len(notes),
+                "public_note_count": len(public_notes),
+                "body_note_count": archive["body_note_count"],
+                "history_archive": archive,
+            }
+            synced.sample_notes = _representative_notes(public_notes)
+            synced.analysis = refreshed_analysis
+            synced.synced_note_count = len(notes)
+            synced.last_analyzed_at = datetime.utcnow()
+            synced.updated_at = datetime.utcnow()
+            db.commit()
+        except Exception as error:
+            db.rollback()
+            current = db.query(CreatorAccount).filter(CreatorAccount.id == account_id).first()
+            if not current:
+                return
+            notes = db.query(CreatorAccountNote).filter(
+                CreatorAccountNote.creator_account_id == current.id,
+            ).all()
+            archive = _history_archive_summary(current, notes)
+            archive.update({
+                "status": "failed",
+                "completed_at": datetime.utcnow().isoformat(),
+                "last_progress_at": datetime.utcnow().isoformat(),
+                "error": str(getattr(error, "detail", error))[:2000],
+            })
+            current.analysis = {**(current.analysis or {}), "history_archive": archive}
+            current.updated_at = datetime.utcnow()
+            db.commit()
+
+
+async def resume_incomplete_owned_account_archives() -> None:
+    with SessionLocal() as db:
+        accounts = db.query(CreatorAccount).filter(
+            CreatorAccount.account_kind == "owned",
+            CreatorAccount.is_active == True,
+        ).all()
+        account_ids = [
+            account.id
+            for account in accounts
+            if isinstance((account.analysis or {}).get("history_archive"), dict)
+            and (account.analysis or {})["history_archive"].get("status") in {"queued", "running"}
+        ]
+    if account_ids:
+        await asyncio.gather(*(
+            _archive_owned_account(account_id, resume=True)
+            for account_id in account_ids
+        ))
 
 
 def _upsert_account_notes(
@@ -327,6 +923,7 @@ def _upsert_account_notes(
         "liked_count", "collected_count", "comment_count", "share_count", "tags",
         "source_data", "published_at",
     )
+    metric_fields = {"liked_count", "collected_count", "comment_count", "share_count"}
     for note_data in notes:
         note_id = str(note_data.get("xhs_note_id") or "").strip()
         if not note_id:
@@ -342,7 +939,17 @@ def _upsert_account_notes(
             existing[note_id] = row
         for field in fields:
             value = note_data.get(field)
-            if field in {"content", "cover_url", "source_url"} and not value and getattr(row, field, None):
+            current = getattr(row, field, None)
+            if field == "source_data":
+                value = _merge_creator_note_source_data(
+                    current if isinstance(current, dict) else {},
+                    value if isinstance(value, dict) else {},
+                )
+            elif field in metric_fields:
+                value = max(int(current or 0), int(value or 0))
+            elif field == "is_private":
+                value = bool(current or value)
+            elif value in (None, "", [], {}) and current not in (None, "", [], {}):
                 continue
             setattr(row, field, value)
         row.last_seen_at = now
@@ -360,6 +967,7 @@ async def sync_account(
     detail_notes: Optional[int] = None,
     preferred_source: Optional[Literal["cli", "tikhub"]] = None,
     published_since: Optional[datetime] = None,
+    page_callback: Optional[ArchivePageCallback] = None,
 ) -> CreatorAccount:
     source = requested_source or account.data_source or "auto"
     identifier = account.xhs_user_id
@@ -367,14 +975,23 @@ async def sync_account(
     if source in {"auto", "tikhub"} and isinstance(resolved_user_id, str):
         if re.fullmatch(r"[0-9a-fA-F]{24}", resolved_user_id):
             identifier = resolved_user_id
-    result = await sync_public_account(
-        identifier,
-        source,
-        max_pages,
-        detail_notes=detail_notes,
-        preferred_source=preferred_source,
-        published_since=published_since,
-    )
+    if page_callback and source == "cli":
+        result = await sync_with_cli(
+            identifier,
+            max_pages,
+            detail_notes=detail_notes,
+            published_since=published_since,
+            page_callback=page_callback,
+        )
+    else:
+        result = await sync_public_account(
+            identifier,
+            source,
+            max_pages,
+            detail_notes=detail_notes,
+            preferred_source=preferred_source,
+            published_since=published_since,
+        )
     profile = result["profile"]
     warnings = result.get("warnings") or []
     now = datetime.utcnow()
@@ -404,6 +1021,7 @@ async def sync_account(
     )
     public_notes = [creator_note_to_dict(note) for note in note_rows if not note.is_private]
     representative = _representative_notes(public_notes)
+    previous_analysis = account.analysis or {}
     analysis = build_basic_analysis(public_notes, profile, warnings)
     analysis.update({
         "data_source": result["source"],
@@ -415,7 +1033,11 @@ async def sync_account(
         "has_more": bool(result.get("has_more")),
         "page_limit_reached": bool(result.get("page_limit_reached")),
         "window_covered": bool(result.get("window_covered")),
+        "body_note_count": sum(bool((note.get("content") or "").strip()) for note in public_notes),
     })
+    for key in ("history_archive", "monitoring_7d"):
+        if key in previous_analysis:
+            analysis[key] = previous_analysis[key]
 
     account.red_id = profile.get("red_id") or account.red_id
     account.nickname = profile.get("nickname") or account.nickname
@@ -466,6 +1088,7 @@ async def list_creator_accounts(
 @router.post("")
 async def create_creator_account(
     payload: CreatorAccountCreateRequest,
+    background_tasks: BackgroundTasks,
     admin: User = Depends(require_manager),
     db: Session = Depends(get_db),
 ):
@@ -491,6 +1114,8 @@ async def create_creator_account(
     db.add(account)
     db.commit()
     db.refresh(account)
+    if account.account_kind == "owned":
+        _queue_owned_account_archive(account, db, background_tasks)
     return creator_account_to_dict(account)
 
 
@@ -547,7 +1172,7 @@ async def update_creator_account(
 async def analyze_creator_account(
     account_id: str,
     source: Optional[DataSource] = Query(default=None),
-    max_pages: int = Query(default=10, ge=1, le=30),
+    max_pages: int = Query(default=10, ge=1, le=100),
     _: User = Depends(require_account_query_operator),
     db: Session = Depends(get_db),
 ):
@@ -563,6 +1188,36 @@ async def analyze_creator_account(
         db.commit()
         raise
     return creator_account_to_dict(synced)
+
+
+@router.post("/{account_id}/archive")
+async def archive_creator_account(
+    account_id: str,
+    background_tasks: BackgroundTasks,
+    _: User = Depends(require_account_query_operator),
+    db: Session = Depends(get_db),
+):
+    account = db.query(CreatorAccount).filter(CreatorAccount.id == account_id).first()
+    if not account:
+        raise HTTPException(status_code=404, detail="创作账号不存在")
+    if account.account_kind != "owned":
+        raise HTTPException(status_code=422, detail="只有自有账号可以归档历史帖子")
+
+    existing = (account.analysis or {}).get("history_archive")
+    if isinstance(existing, dict) and existing.get("status") in {"queued", "running"}:
+        last_progress = existing.get("last_progress_at") or existing.get("started_at")
+        try:
+            still_active = (
+                datetime.fromisoformat(str(last_progress))
+                >= datetime.utcnow() - timedelta(minutes=10)
+            )
+        except (TypeError, ValueError):
+            still_active = False
+        if still_active:
+            return creator_account_to_dict(account)
+
+    _queue_owned_account_archive(account, db, background_tasks)
+    return creator_account_to_dict(account)
 
 
 @router.get("/status/public-data")
@@ -591,8 +1246,9 @@ async def list_creator_account_notes(
     account_id: str,
     sort: Literal["published_at", "engagement", "likes", "collections", "comments"] = "engagement",
     order: Literal["asc", "desc"] = "desc",
+    q: Optional[str] = Query(default=None, max_length=200),
     page: int = Query(default=1, ge=1),
-    page_size: int = Query(default=30, ge=1, le=100),
+    page_size: int = Query(default=30, ge=1, le=500),
     _: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
@@ -603,7 +1259,16 @@ async def list_creator_account_notes(
         CreatorAccountNote.creator_account_id == account_id,
         CreatorAccountNote.is_private == False,
     )
+    if q and q.strip():
+        keyword = f"%{q.strip()}%"
+        query = query.filter(
+            CreatorAccountNote.title.ilike(keyword)
+            | CreatorAccountNote.content.ilike(keyword)
+        )
     total = query.count()
+    body_count = query.filter(CreatorAccountNote.content.isnot(None)).filter(
+        CreatorAccountNote.content != "",
+    ).count()
     if sort == "engagement":
         expression = (
             CreatorAccountNote.liked_count
@@ -626,9 +1291,27 @@ async def list_creator_account_notes(
     return {
         "items": [creator_note_to_dict(row) for row in rows],
         "total": total,
+        "body_count": body_count,
         "page": page,
         "page_size": page_size,
     }
+
+
+@router.get("/{account_id}/notes/{note_id}")
+async def get_creator_account_note(
+    account_id: str,
+    note_id: str,
+    _: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    note = db.query(CreatorAccountNote).filter(
+        CreatorAccountNote.creator_account_id == account_id,
+        CreatorAccountNote.xhs_note_id == note_id,
+        CreatorAccountNote.is_private == False,
+    ).first()
+    if not note:
+        raise HTTPException(status_code=404, detail="账号帖子不存在或不可用")
+    return creator_note_to_dict(note)
 
 
 @router.get("/{account_id}/snapshots")

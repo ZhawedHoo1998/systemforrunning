@@ -15,7 +15,7 @@ from sqlalchemy.orm import Session
 
 from backend.auth import get_current_user, require_admin
 from backend.database import get_db
-from backend.models import AiFeedback, CreatorAccount, Material, User
+from backend.models import AiFeedback, CreatorAccount, CreatorAccountNote, Material, User
 
 try:
     from openai import AsyncOpenAI, OpenAIError
@@ -52,7 +52,7 @@ AiTask = Literal["concept", "title", "note", "video", "rewrite"]
 TASK_INSTRUCTIONS = {
     "concept": "根据写手的想法先提供结构化创作方案：多类标题、多种笔记风格与推荐方向，不要直接替写手拍板。",
     "title": "生成适合小红书发布的标题方案，并说明每个标题的核心抓手。",
-    "note": "撰写完整的小红书笔记，结构清晰、语气自然，避免虚假承诺。",
+    "note": "围绕小红书笔记协作写作：仍在确认方向或信息时先讨论和提问，只有用户明确要求完整正文时再生成成稿。结构要清晰、语气自然，避免虚假承诺。",
     "video": "撰写短视频脚本，包含开场钩子、分镜或口播、卖点展开和结尾行动引导。",
     "rewrite": "根据用户要求改写内容，保留事实信息并优化表达、节奏和可读性。",
 }
@@ -75,7 +75,15 @@ class ChatRequest(BaseModel):
     brand: Optional[str] = Field(default=None, max_length=200)
     car_model: Optional[str] = Field(default=None, max_length=200)
     material_ids: list[str] = Field(default_factory=list, max_length=12)
+    creator_note_ids: list[str] = Field(default_factory=list, max_length=20)
     messages: list[ChatMessage] = Field(min_length=1, max_length=100)
+
+    @field_validator("creator_note_ids")
+    @classmethod
+    def normalize_creator_note_ids(cls, note_ids: list[str]):
+        return list(dict.fromkeys(
+            note_id.strip()[:100] for note_id in note_ids if note_id.strip()
+        ))[:20]
 
     @field_validator("messages")
     @classmethod
@@ -283,6 +291,85 @@ def load_creator_account(db: Session, account_id: Optional[str]):
     return account
 
 
+def load_creator_notes(
+    db: Session,
+    account: Optional[CreatorAccount],
+    note_ids: list[str],
+):
+    if not note_ids:
+        return []
+    if not account:
+        raise HTTPException(status_code=422, detail="选择账号旧帖前请先选择发布账号")
+    rows = db.query(CreatorAccountNote).filter(
+        CreatorAccountNote.creator_account_id == account.id,
+        CreatorAccountNote.xhs_note_id.in_(set(note_ids)),
+        CreatorAccountNote.is_private == False,
+    ).all()
+    by_id = {row.xhs_note_id: row for row in rows}
+    return [by_id[note_id] for note_id in note_ids if note_id in by_id]
+
+
+def build_creator_note_context(notes: list[CreatorAccountNote]):
+    if not notes:
+        return ""
+
+    def note_title(note: CreatorAccountNote):
+        return note.title or "无标题"
+
+    def top_note(metric):
+        return max(notes, key=metric)
+
+    top_liked = top_note(lambda note: note.liked_count or 0)
+    top_collected = top_note(lambda note: note.collected_count or 0)
+    top_commented = top_note(lambda note: note.comment_count or 0)
+    top_shared = top_note(lambda note: note.share_count or 0)
+
+    def engagement(note: CreatorAccountNote):
+        return (
+            (note.liked_count or 0)
+            + (note.collected_count or 0)
+            + (note.comment_count or 0) * 2
+            + (note.share_count or 0) * 2
+        )
+
+    top_engagement = top_note(engagement)
+    overview = "\n".join([
+        "[所选账号旧帖数据概览]",
+        f"共选择 {len(notes)} 篇旧帖。",
+        f"最高点赞：{top_liked.liked_count or 0}（《{note_title(top_liked)}》）",
+        f"最高收藏：{top_collected.collected_count or 0}（《{note_title(top_collected)}》）",
+        f"最高评论：{top_commented.comment_count or 0}（《{note_title(top_commented)}》）",
+        f"最高转发：{top_shared.share_count or 0}（《{note_title(top_shared)}》）",
+        f"最高综合互动：{engagement(top_engagement)}（《{note_title(top_engagement)}》）",
+    ])
+    sections = [overview]
+    remaining = 30000 - len(overview)
+    for index, note in enumerate(notes, start=1):
+        fields = [
+            f"标题：{note.title or '无标题'}",
+            (
+                "公开互动："
+                f"赞 {note.liked_count or 0}、藏 {note.collected_count or 0}、"
+                f"评 {note.comment_count or 0}、转 {note.share_count or 0}"
+            ),
+        ]
+        if note.published_at:
+            fields.append(f"发布时间：{note.published_at.isoformat()}")
+        if note.tags:
+            fields.append(f"标签：{'、'.join(note.tags)}")
+        if note.content:
+            fields.append(f"正文：{note.content}")
+
+        section = f"[账号旧帖 {index}]\n" + "\n".join(fields)
+        if len(section) > remaining:
+            section = section[:remaining]
+        sections.append(section)
+        remaining -= len(section)
+        if remaining <= 0:
+            break
+    return "\n\n".join(sections)
+
+
 def build_creator_account_context(account: Optional[CreatorAccount]):
     if not account:
         return ""
@@ -337,6 +424,7 @@ def build_instructions(
     car_model: Optional[str],
     context: str,
     creator_account_context: str = "",
+    creator_note_context: str = "",
 ):
     vehicle = " / ".join(filter(None, [brand, car_model])) or "未指定车型"
     parts = [
@@ -349,7 +437,49 @@ def build_instructions(
         parts.append("以下是写手主动选择的内部参考素材：\n" + context)
     if creator_account_context:
         parts.append("以下是本次内容要发布到的账号画像：\n" + creator_account_context)
+    if creator_note_context:
+        parts.append(
+            "以下是写手从该账号历史公开笔记中主动选择的参考内容。"
+            "只参考其选题、结构、语气和有效表达，不要照抄句子，也不要把历史互动数据写进新内容：\n"
+            + creator_note_context
+        )
     return "\n\n".join(parts)
+
+
+def build_image_prompt(
+    prompt: str,
+    reference_count: int,
+    image_history: list[str],
+    vehicle: str,
+    material_context: str,
+    creator_note_context: str,
+):
+    prompt_parts = [
+        prompt,
+        f"用户提供了 {reference_count} 张参考图。综合这些图片作为视觉依据，保留用户要求的主体、构图或氛围，不要无依据地改变产品结构。",
+    ]
+    if image_history:
+        prompt_parts.append(
+            "此前各轮修改要求（用于理解连续意图，当前要求优先）：\n"
+            + "\n".join(
+                f"{index}. {item}"
+                for index, item in enumerate(image_history, start=1)
+            )
+        )
+    if vehicle:
+        prompt_parts.append(f"品牌车型背景：{vehicle}")
+    if material_context:
+        prompt_parts.append(
+            "参考素材信息（仅用于理解主题，不要在画面中生成可读长文）：\n"
+            + material_context[:8000]
+        )
+    if creator_note_context:
+        prompt_parts.append(
+            "所选账号旧帖的文字、标签与公开表现数据（用于理解主题、视觉重点和历史有效表达；"
+            "不要照抄旧帖，也不要在画面中生成互动数字或可读长文）：\n"
+            + creator_note_context[:12000]
+        )
+    return "\n\n".join(prompt_parts)
 
 
 def parse_json_output(output_text: str):
@@ -551,12 +681,14 @@ async def chat(request: ChatRequest, db: Session = Depends(get_db)):
     client = get_client(settings["api_key"], settings["base_url"])
     materials = load_materials(db, request.material_ids)
     creator_account = load_creator_account(db, request.creator_account_id)
+    creator_notes = load_creator_notes(db, creator_account, request.creator_note_ids)
     instructions = build_instructions(
         request.task,
         request.brand,
         request.car_model,
         build_material_context(materials),
         build_creator_account_context(creator_account),
+        build_creator_note_context(creator_notes),
     )
 
     async def event_stream():
@@ -669,12 +801,14 @@ async def create_writing_plan(request: ChatRequest, db: Session = Depends(get_db
     client = get_client(settings["api_key"], settings["base_url"])
     materials = load_materials(db, request.material_ids)
     creator_account = load_creator_account(db, request.creator_account_id)
+    creator_notes = load_creator_notes(db, creator_account, request.creator_note_ids)
     instructions = build_instructions(
         "concept",
         request.brand,
         request.car_model,
         build_material_context(materials),
         build_creator_account_context(creator_account),
+        build_creator_note_context(creator_notes),
     ) + """
 
 你现在只负责整理可供写手选择的创作方案。标题之间必须有实质差异，内容方向需要具体到开头、语气和结构。
@@ -848,6 +982,8 @@ async def generate_image(
     brand: Optional[str] = Form(None),
     car_model: Optional[str] = Form(None),
     material_ids: str = Form("[]"),
+    creator_account_id: Optional[str] = Form(None, max_length=36),
+    creator_note_ids: str = Form("[]"),
     db: Session = Depends(get_db),
 ):
     settings = get_settings()
@@ -859,6 +995,22 @@ async def generate_image(
         raise HTTPException(status_code=422, detail="参考素材格式不正确") from error
     if not isinstance(parsed_material_ids, list) or len(parsed_material_ids) > 8:
         raise HTTPException(status_code=422, detail="参考素材最多选择 8 条")
+    try:
+        parsed_creator_note_ids = json.loads(creator_note_ids)
+    except json.JSONDecodeError as error:
+        raise HTTPException(status_code=422, detail="账号旧帖格式不正确") from error
+    if (
+        not isinstance(parsed_creator_note_ids, list)
+        or len(parsed_creator_note_ids) > 20
+        or any(
+            not isinstance(item, str) or len(item.strip()) > 100
+            for item in parsed_creator_note_ids
+        )
+    ):
+        raise HTTPException(status_code=422, detail="账号旧帖最多选择 20 篇")
+    parsed_creator_note_ids = list(dict.fromkeys(
+        item.strip() for item in parsed_creator_note_ids if item.strip()
+    ))
     try:
         parsed_image_history = json.loads(image_history)
     except json.JSONDecodeError as error:
@@ -906,27 +1058,22 @@ async def generate_image(
     if len(reference_attachment_data) != len(references):
             raise HTTPException(status_code=422, detail="参考图附件无效")
 
-    client = get_client(settings["image_api_key"], settings["image_base_url"])
     materials = load_materials(db, [str(item) for item in parsed_material_ids])
     context = build_material_context(materials)
+    creator_account = load_creator_account(db, creator_account_id)
+    creator_notes = load_creator_notes(db, creator_account, parsed_creator_note_ids)
+    creator_note_context = build_creator_note_context(creator_notes)
     vehicle = " / ".join(filter(None, [brand, car_model]))
-    prompt_parts = [
+    image_prompt = build_image_prompt(
         prompt,
-        f"用户提供了 {len(references)} 张参考图。综合这些图片作为视觉依据，保留用户要求的主体、构图或氛围，不要无依据地改变产品结构。",
-    ]
-    if parsed_image_history:
-        prompt_parts.append(
-            "此前各轮修改要求（用于理解连续意图，当前要求优先）：\n"
-            + "\n".join(
-                f"{index}. {item}"
-                for index, item in enumerate(parsed_image_history, start=1)
-            )
-        )
-    if vehicle:
-        prompt_parts.append(f"品牌车型背景：{vehicle}")
-    if context:
-        prompt_parts.append("参考素材信息（仅用于理解主题，不要在画面中生成可读长文）：\n" + context[:8000])
+        len(references),
+        parsed_image_history,
+        vehicle,
+        context,
+        creator_note_context,
+    )
 
+    client = get_client(settings["image_api_key"], settings["image_base_url"])
     try:
         image_inputs = [
             (reference["filename"], reference["bytes"], reference["content_type"])
@@ -935,7 +1082,7 @@ async def generate_image(
         result = await client.images.edit(
             model=settings["image_model"],
             image=image_inputs[0] if len(image_inputs) == 1 else image_inputs,
-            prompt="\n\n".join(prompt_parts),
+            prompt=image_prompt,
             size=settings["image_size"],
             quality=settings["image_quality"],
             input_fidelity="high",

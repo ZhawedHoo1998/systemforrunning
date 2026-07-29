@@ -13,6 +13,7 @@ import {
   History,
   LoaderCircle,
   Maximize2,
+  MessageSquareText,
   Sparkles,
   Star,
 } from "lucide-react"
@@ -35,7 +36,6 @@ import { cn } from "@/lib/utils"
 interface PlanWorkspaceProps {
   plans: AiWritingPlan[]
   activePlan: AiWritingPlan | null
-  generatingDraft: boolean
   onSelectPlan: (planId: string) => void
   onSelectTitle: (titleId: string) => void
   onToggleDirection: (directionId: string) => void
@@ -45,7 +45,6 @@ interface PlanWorkspaceProps {
 export function AiPlanWorkspace({
   plans,
   activePlan,
-  generatingDraft,
   onSelectPlan,
   onSelectTitle,
   onToggleDirection,
@@ -189,10 +188,10 @@ export function AiPlanWorkspace({
         <Button
           type="button"
           onClick={onDevelopDraft}
-          disabled={!activePlan.selected_title_id || activePlan.selected_direction_ids.length === 0 || generatingDraft}
+          disabled={!activePlan.selected_title_id || activePlan.selected_direction_ids.length === 0}
         >
-          {generatingDraft ? <LoaderCircle className="animate-spin" /> : <FilePenLine />}
-          {generatingDraft ? "正在生成正文" : "采用并深入创作"}
+          <MessageSquareText />
+          采用并继续讨论
         </Button>
       </div>
     </div>

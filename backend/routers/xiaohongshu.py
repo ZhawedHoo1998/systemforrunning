@@ -419,6 +419,7 @@ async def _download_image(
     client: httpx.AsyncClient,
     url: str,
     index: int,
+    filename_prefix: str | None = None,
 ) -> tuple[dict[str, Any] | None, str | None]:
     parsed = urlparse(url)
     if not _host_allowed(parsed.hostname, IMAGE_DOMAINS):
@@ -426,7 +427,25 @@ async def _download_image(
 
     filename = ""
     filepath: Path | None = None
+    temporary_path: Path | None = None
     try:
+        safe_prefix = re.sub(r"[^A-Za-z0-9_-]+", "-", filename_prefix or "").strip("-")[:160]
+        if safe_prefix:
+            existing = next((
+                candidate
+                for candidate in UPLOAD_DIR.glob(f"{safe_prefix}-image-{index + 1}.*")
+                if candidate.suffix.lower() in {".jpg", ".jpeg", ".png", ".webp", ".gif", ".avif"}
+                and candidate.is_file()
+                and candidate.stat().st_size > 0
+            ), None)
+            if existing and existing.is_file():
+                content_type = mimetypes.guess_type(existing.name)[0] or "image/jpeg"
+                return ({
+                    "name": f"小红书图片-{index + 1}{existing.suffix.lower()}",
+                    "path": f"/uploads/{existing.name}",
+                    "type": content_type,
+                    "size": existing.stat().st_size,
+                }, None)
         async with client.stream("GET", url) as response:
             response.raise_for_status()
             if not _host_allowed(response.url.host, IMAGE_DOMAINS):
@@ -437,15 +456,23 @@ async def _download_image(
             if content_type and not content_type.startswith("image/"):
                 return None, f"第 {index + 1} 个附件不是图片"
 
-            filename = f"xhs-{uuid.uuid4().hex}{extension}"
+            filename = (
+                f"{safe_prefix}-image-{index + 1}{extension}"
+                if safe_prefix
+                else f"xhs-{uuid.uuid4().hex}{extension}"
+            )
             filepath = UPLOAD_DIR / filename
+            temporary_path = UPLOAD_DIR / f".{filename}.{uuid.uuid4().hex}.tmp"
             total_size = 0
-            async with aiofiles.open(filepath, "wb") as output:
+            async with aiofiles.open(temporary_path, "wb") as output:
                 async for chunk in response.aiter_bytes(1024 * 256):
                     total_size += len(chunk)
                     if total_size > MAX_IMAGE_SIZE:
                         raise ValueError("图片超过 25MB")
                     await output.write(chunk)
+            if total_size == 0:
+                raise ValueError("图片内容为空")
+            temporary_path.replace(filepath)
 
         guessed_type = content_type or mimetypes.guess_type(filename)[0] or "image/jpeg"
         return ({
@@ -455,12 +482,16 @@ async def _download_image(
             "size": total_size,
         }, None)
     except (httpx.HTTPError, OSError, ValueError) as error:
-        if filepath and filepath.exists():
-            filepath.unlink()
+        if temporary_path and temporary_path.exists():
+            temporary_path.unlink()
         return None, f"第 {index + 1} 张图片下载失败：{error}"
 
 
-async def download_images(image_urls: list[str]) -> tuple[list[dict[str, Any]], list[str]]:
+async def download_images(
+    image_urls: list[str],
+    *,
+    filename_prefix: str | None = None,
+) -> tuple[list[dict[str, Any]], list[str]]:
     if not image_urls:
         return [], []
 
@@ -473,7 +504,7 @@ async def download_images(image_urls: list[str]) -> tuple[list[dict[str, Any]], 
     ) as client:
         async def download(url: str, index: int):
             async with semaphore:
-                return await _download_image(client, url, index)
+                return await _download_image(client, url, index, filename_prefix)
 
         results = await asyncio.gather(*(
             download(url, index) for index, url in enumerate(image_urls)
@@ -484,7 +515,11 @@ async def download_images(image_urls: list[str]) -> tuple[list[dict[str, Any]], 
     return attachments, warnings
 
 
-async def download_video(video_url: str | None) -> tuple[dict[str, Any] | None, str | None]:
+async def download_video(
+    video_url: str | None,
+    *,
+    filename_prefix: str | None = None,
+) -> tuple[dict[str, Any] | None, str | None]:
     if not video_url:
         return None, None
 
@@ -492,9 +527,18 @@ async def download_video(video_url: str | None) -> tuple[dict[str, Any] | None, 
     if not _host_allowed(parsed.hostname, IMAGE_DOMAINS):
         return None, "视频来源域名不受支持"
 
-    filename = f"xhs-{uuid.uuid4().hex}.mp4"
+    safe_prefix = re.sub(r"[^A-Za-z0-9_-]+", "-", filename_prefix or "").strip("-")[:160]
+    filename = f"{safe_prefix}-video.mp4" if safe_prefix else f"xhs-{uuid.uuid4().hex}.mp4"
     filepath = UPLOAD_DIR / filename
+    temporary_path = UPLOAD_DIR / f".{filename}.{uuid.uuid4().hex}.tmp"
     try:
+        if filepath.is_file() and filepath.stat().st_size > 0:
+            return ({
+                "name": "小红书视频-1.mp4",
+                "path": f"/uploads/{filename}",
+                "type": "video/mp4",
+                "size": filepath.stat().st_size,
+            }, None)
         async with httpx.AsyncClient(
             follow_redirects=True,
             max_redirects=5,
@@ -511,12 +555,15 @@ async def download_video(video_url: str | None) -> tuple[dict[str, Any] | None, 
                     return None, "视频超过 200MB，未自动下载"
 
                 total_size = 0
-                async with aiofiles.open(filepath, "wb") as output:
+                async with aiofiles.open(temporary_path, "wb") as output:
                     async for chunk in response.aiter_bytes(1024 * 512):
                         total_size += len(chunk)
                         if total_size > MAX_VIDEO_SIZE:
                             raise ValueError("视频超过 200MB")
                         await output.write(chunk)
+                if total_size == 0:
+                    raise ValueError("视频内容为空")
+                temporary_path.replace(filepath)
 
         return ({
             "name": "小红书视频-1.mp4",
@@ -525,8 +572,8 @@ async def download_video(video_url: str | None) -> tuple[dict[str, Any] | None, 
             "size": total_size,
         }, None)
     except (httpx.HTTPError, OSError, ValueError) as error:
-        if filepath.exists():
-            filepath.unlink()
+        if temporary_path.exists():
+            temporary_path.unlink()
         return None, f"视频下载失败：{error}"
 
 

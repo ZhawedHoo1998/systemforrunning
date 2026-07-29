@@ -6,3 +6,5 @@ frontend/.next/
 frontend/node_modules/
 backups/
 runtime/
+backend/uploads/creator-*
+data/*-runtime.*.log

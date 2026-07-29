@@ -38,7 +38,7 @@ class PublicDataNormalizationTests(unittest.TestCase):
             "title": "完整标题",
             "desc": "完整正文",
             "interact_info": {},
-        })
+        }, raw_source="detail")
 
         merged = xhs_public_data.merge_note_detail(listing, detail)
 
@@ -46,10 +46,39 @@ class PublicDataNormalizationTests(unittest.TestCase):
         self.assertEqual(merged["content"], "完整正文")
         self.assertEqual(merged["liked_count"], 88)
         self.assertEqual(merged["collected_count"], 3)
+        self.assertIn("raw_listing", merged["source_data"])
+        self.assertIn("raw_detail", merged["source_data"])
+        self.assertTrue(merged["source_data"]["detail_fetched_at"])
 
     def test_zero_detail_limit_returns_no_candidates(self):
         note = xhs_public_data.normalize_note(listing_note("note-1"))
         self.assertEqual(xhs_public_data._detail_candidates([note], 0), [])
+
+    def test_flat_camel_case_detail_is_extracted_and_normalized(self):
+        payload = {
+            "noteId": "note-camel",
+            "title": "Archived note",
+            "desc": "Complete archived body",
+            "imageList": [{"urlDefault": "http://example.com/image.webp"}],
+            "interactInfo": {
+                "likedCount": "12",
+                "collectedCount": "7",
+                "commentCount": "3",
+                "shareCount": "2",
+            },
+            "ipLocation": "Shanghai",
+            "xsecToken": "token",
+        }
+
+        items = xhs_public_data._extract_note_items(payload)
+        note = xhs_public_data.normalize_note(items[0], raw_source="detail")
+
+        self.assertEqual(note["xhs_note_id"], "note-camel")
+        self.assertEqual(note["content"], "Complete archived body")
+        self.assertEqual(note["liked_count"], 12)
+        self.assertEqual(note["collected_count"], 7)
+        self.assertEqual(note["source_data"]["image_urls"], ["https://example.com/image.webp"])
+        self.assertEqual(note["source_data"]["ip_location"], "Shanghai")
 
     def test_discovery_ranking_deduplicates_same_note(self):
         note = xhs_public_data.normalize_note(listing_note("note-1", likes=50))
@@ -87,6 +116,11 @@ class PublicDataSyncTests(unittest.IsolatedAsyncioTestCase):
     @patch("backend.xhs_public_data.asyncio.sleep", new_callable=AsyncMock)
     @patch("backend.xhs_public_data.run_xhs_command", new_callable=AsyncMock)
     async def test_cli_sync_follows_cursor_until_complete(self, run_command, _sleep):
+        page_progress = []
+
+        async def record_page(notes, progress):
+            page_progress.append((len(notes), progress["pages_fetched"], progress["has_more"]))
+
         async def command_result(command, target, timeout_seconds, *, extra_args=None):
             if command == "user":
                 return {
@@ -100,12 +134,17 @@ class PublicDataSyncTests(unittest.IsolatedAsyncioTestCase):
             raise AssertionError((command, target, timeout_seconds, extra_args))
 
         run_command.side_effect = command_result
-        result = await xhs_public_data.sync_with_cli("65a38b4d000000000b0293f6", 5)
+        result = await xhs_public_data.sync_with_cli(
+            "65a38b4d000000000b0293f6",
+            5,
+            page_callback=record_page,
+        )
 
         self.assertEqual(result["pages_fetched"], 2)
         self.assertEqual(len(result["notes"]), 2)
         self.assertFalse(result["has_more"])
         self.assertFalse(result["page_limit_reached"])
+        self.assertEqual(page_progress, [(1, 1, True), (1, 2, False)])
 
     @patch.dict(os.environ, {"XHS_ACCOUNT_DETAIL_NOTES": "0"})
     @patch("backend.xhs_public_data.run_xhs_command", new_callable=AsyncMock)
