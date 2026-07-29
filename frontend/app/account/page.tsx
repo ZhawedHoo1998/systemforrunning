@@ -2,7 +2,7 @@
 
 import { FormEvent, useState } from "react"
 import Link from "next/link"
-import { AlertCircle, KeyRound, LoaderCircle, LogOut, ShieldCheck, Users } from "lucide-react"
+import { AlertCircle, AtSign, KeyRound, LoaderCircle, LogOut, ShieldCheck, Users } from "lucide-react"
 import { useAuth } from "@/components/AuthProvider"
 import { Header } from "@/components/Header"
 import { Button } from "@/components/ui/button"
@@ -67,16 +67,28 @@ export default function AccountPage() {
               </div>
               <div className="grid gap-1 py-4 sm:grid-cols-[140px_1fr] sm:items-center">
                 <dt className="text-sm text-muted-foreground">权限</dt>
-                <dd className="text-sm font-medium">{user?.role === "admin" ? "管理员" : "写手"}</dd>
+                <dd className="text-sm font-medium">
+                  {user?.role === "admin" ? "管理员" : user?.role === "manager" ? "运营管理" : "写手"}
+                </dd>
               </div>
             </dl>
 
             <div className="mt-5 flex flex-wrap gap-3">
               {user?.role === "admin" && (
-                <Button asChild>
-                  <Link href="/users">
-                    <Users />
-                    用户管理
+                <>
+                  <Button asChild>
+                    <Link href="/users">
+                      <Users />
+                      用户管理
+                    </Link>
+                  </Button>
+                </>
+              )}
+              {(user?.role === "admin" || user?.role === "manager") && (
+                <Button asChild variant="outline">
+                  <Link href="/creator-accounts">
+                    <AtSign />
+                    创作账号管理
                   </Link>
                 </Button>
               )}

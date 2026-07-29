@@ -1,11 +1,13 @@
 "use client"
 
+import { useEffect, useState } from "react"
 import Link from "next/link"
 import { usePathname } from "next/navigation"
-import { CarFront, Clock3, FileText, Heart, Lightbulb, Plus, Search, Sparkles, UserRound } from "lucide-react"
+import { CarFront, ClipboardCheck, Clock3, FileText, Heart, Lightbulb, Plus, Search, Sparkles, UserRound } from "lucide-react"
 import { useAuth } from "@/components/AuthProvider"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
+import { getTaskSummary } from "@/lib/api"
 import { cn } from "@/lib/utils"
 
 interface HeaderProps {
@@ -19,6 +21,7 @@ const navigation = [
   { href: "/", label: "车型素材", icon: CarFront },
   { href: "/inspiration", label: "灵感中心", icon: Lightbulb },
   { href: "/ai", label: "AI 创作", icon: Sparkles },
+  { href: "/tasks", label: "任务", icon: ClipboardCheck },
   { href: "/creations", label: "我的创作", icon: FileText },
   { href: "/favorites", label: "我的收藏", icon: Heart },
   { href: "/recent", label: "最近新增", icon: Clock3 },
@@ -32,6 +35,34 @@ export function Header({
 }: HeaderProps) {
   const pathname = usePathname()
   const { user } = useAuth()
+  const [taskReminderCount, setTaskReminderCount] = useState(0)
+
+  useEffect(() => {
+    if (!user) return
+    let cancelled = false
+    const refresh = async () => {
+      try {
+        const result = await getTaskSummary(true)
+        if (!cancelled) setTaskReminderCount(result.notification_count)
+      } catch {
+        if (!cancelled) setTaskReminderCount(0)
+      }
+    }
+    const handleTasksUpdated = (event: Event) => {
+      const count = (event as CustomEvent<number>).detail
+      if (typeof count === "number") setTaskReminderCount(count)
+      else void refresh()
+    }
+
+    void refresh()
+    const interval = window.setInterval(() => void refresh(), 60_000)
+    window.addEventListener("ruby-rain:tasks-updated", handleTasksUpdated)
+    return () => {
+      cancelled = true
+      window.clearInterval(interval)
+      window.removeEventListener("ruby-rain:tasks-updated", handleTasksUpdated)
+    }
+  }, [user])
 
   return (
     <header className="sticky top-0 z-40 border-b bg-card/95 backdrop-blur">
@@ -56,12 +87,19 @@ export function Header({
                 variant="ghost"
                 size="sm"
                 className={cn(
-                  "h-9 px-3 text-muted-foreground shadow-none",
+                  "h-9 px-2.5 text-muted-foreground shadow-none",
                   active && "bg-accent text-accent-foreground"
                 )}
               >
                 <Link href={href} aria-current={active ? "page" : undefined}>
-                  <Icon />
+                  <span className="relative">
+                    <Icon />
+                    {href === "/tasks" && taskReminderCount > 0 && (
+                      <span className="absolute -right-2.5 -top-2.5 grid min-w-4 place-items-center rounded-full bg-red-600 px-1 text-[9px] font-semibold leading-4 text-white">
+                        {taskReminderCount > 99 ? "99+" : taskReminderCount}
+                      </span>
+                    )}
+                  </span>
                   {label}
                 </Link>
               </Button>
@@ -126,7 +164,14 @@ export function Header({
                 active && "border-primary font-medium text-primary"
               )}
             >
-              <Icon className="size-3.5" />
+              <span className="relative">
+                <Icon className="size-3.5" />
+                {href === "/tasks" && taskReminderCount > 0 && (
+                  <span className="absolute -right-2 -top-2 grid min-w-3.5 place-items-center rounded-full bg-red-600 px-0.5 text-[8px] font-semibold leading-[14px] text-white">
+                    {taskReminderCount > 9 ? "9+" : taskReminderCount}
+                  </span>
+                )}
+              </span>
               {label}
             </Link>
           )

@@ -15,14 +15,16 @@ from backend.database import (
     migrate_material_ai_conversation,
     migrate_material_source_metadata,
     migrate_material_scope,
+    migrate_creator_account_intelligence,
     migrate_multi_user_data,
 )
-from backend.routers import ai, creations, materials, uploads, users, xiaohongshu, xiaohongshu_shop
+from backend.routers import ai, creations, creator_accounts, materials, tasks, uploads, users, xiaohongshu, xiaohongshu_shop
 
 Base.metadata.create_all(bind=engine)
 migrate_material_scope()
 migrate_material_ai_conversation()
 migrate_material_source_metadata()
+migrate_creator_account_intelligence()
 migrate_multi_user_data()
 migrate_ai_materials_to_creations()
 
@@ -57,6 +59,8 @@ app.include_router(uploads.router)
 app.include_router(xiaohongshu.router)
 app.include_router(xiaohongshu_shop.router)
 app.include_router(creations.router)
+app.include_router(creator_accounts.router)
+app.include_router(tasks.router)
 app.include_router(ai.router)
 app.include_router(users.auth_router)
 app.include_router(users.users_router)

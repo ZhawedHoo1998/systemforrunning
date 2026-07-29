@@ -28,8 +28,8 @@ interface MaterialDrawerProps {
   material: Material | null
   onClose: () => void
   onToggleFavorite: (id: string) => void
-  onEdit: (material: Material) => void
-  onDelete: (id: string) => Promise<void>
+  onEdit?: (material: Material) => void
+  onDelete?: (id: string) => Promise<void>
 }
 
 interface ContentSectionProps {
@@ -88,6 +88,7 @@ export function MaterialDrawer({
   }
 
   const handleDelete = async () => {
+    if (!onDelete) return
     if (!window.confirm("确定要删除这个素材吗？此操作无法撤销。")) return
     setIsDeleting(true)
     try {
@@ -407,21 +408,25 @@ export function MaterialDrawer({
             <Heart className={cn(material.is_favorite && "fill-primary text-primary")} />
             {material.is_favorite ? "已收藏" : "收藏"}
           </Button>
-          <Button variant="outline" className="flex-1" onClick={() => onEdit(material)}>
-            <Edit3 />
-            编辑
-          </Button>
-          <Button
-            variant="ghost"
-            size="icon"
-            className="text-destructive hover:bg-red-50 hover:text-destructive"
-            onClick={handleDelete}
-            disabled={isDeleting}
-            aria-label="删除素材"
-            title="删除素材"
-          >
-            <Trash2 />
-          </Button>
+          {onEdit && (
+            <Button variant="outline" className="flex-1" onClick={() => onEdit(material)}>
+              <Edit3 />
+              编辑
+            </Button>
+          )}
+          {onDelete && (
+            <Button
+              variant="ghost"
+              size="icon"
+              className="text-destructive hover:bg-red-50 hover:text-destructive"
+              onClick={handleDelete}
+              disabled={isDeleting}
+              aria-label="删除素材"
+              title="删除素材"
+            >
+              <Trash2 />
+            </Button>
+          )}
         </footer>
       </aside>
       <ImageLightbox image={previewImage} onOpenChange={(open) => !open && setPreviewImage(null)} />

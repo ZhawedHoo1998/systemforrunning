@@ -1,6 +1,7 @@
 import type { Metadata } from "next"
 import { Geist, Geist_Mono } from "next/font/google"
 import { AuthProvider } from "@/components/AuthProvider"
+import { DailyMaterialNotifications } from "@/components/DailyMaterialNotifications"
 import "./globals.css"
 
 const geistSans = Geist({
@@ -26,7 +27,10 @@ export default function RootLayout({
   return (
     <html lang="zh-CN" className={`${geistSans.variable} ${geistMono.variable}`}>
       <body className="min-h-screen bg-background antialiased">
-        <AuthProvider>{children}</AuthProvider>
+        <AuthProvider>
+          <DailyMaterialNotifications />
+          {children}
+        </AuthProvider>
       </body>
     </html>
   )

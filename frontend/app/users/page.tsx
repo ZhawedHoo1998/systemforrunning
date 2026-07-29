@@ -189,7 +189,9 @@ export default function UsersPage() {
                     </td>
                     <td className="px-4 py-3.5 text-muted-foreground">{user.username}</td>
                     <td className="px-4 py-3.5">
-                      <Badge variant={user.role === "admin" ? "secondary" : "outline"}>{user.role === "admin" ? "管理员" : "写手"}</Badge>
+                      <Badge variant={user.role === "admin" ? "secondary" : "outline"}>
+                        {user.role === "admin" ? "管理员" : user.role === "manager" ? "运营管理" : "写手"}
+                      </Badge>
                     </td>
                     <td className="px-4 py-3.5">
                       <span className={user.is_active ? "text-emerald-700" : "text-muted-foreground"}>{user.is_active ? "已启用" : "已停用"}</span>
@@ -252,6 +254,7 @@ export default function UsersPage() {
                 <SelectTrigger aria-label="选择用户角色"><SelectValue /></SelectTrigger>
                 <SelectContent>
                   <SelectItem value="writer">写手</SelectItem>
+                  <SelectItem value="manager">运营管理</SelectItem>
                   <SelectItem value="admin">管理员</SelectItem>
                 </SelectContent>
               </Select>

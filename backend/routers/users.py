@@ -58,13 +58,13 @@ class UserCreateRequest(BaseModel):
     username: str = Field(min_length=3, max_length=50)
     display_name: str = Field(min_length=1, max_length=200)
     password: str = Field(min_length=8, max_length=128)
-    role: Literal["admin", "writer"] = "writer"
+    role: Literal["admin", "manager", "writer"] = "writer"
 
 
 class UserUpdateRequest(BaseModel):
     display_name: Optional[str] = Field(default=None, min_length=1, max_length=200)
     password: Optional[str] = Field(default=None, min_length=8, max_length=128)
-    role: Optional[Literal["admin", "writer"]] = None
+    role: Optional[Literal["admin", "manager", "writer"]] = None
     is_active: Optional[bool] = None
 
 
@@ -278,7 +278,7 @@ async def update_user(
     if not user:
         raise HTTPException(status_code=404, detail="用户不存在")
     if user.id == admin.id and (
-        payload.is_active is False or payload.role == "writer"
+        payload.is_active is False or (payload.role is not None and payload.role != "admin")
     ):
         raise HTTPException(status_code=422, detail="不能停用自己或移除自己的管理员权限")
 

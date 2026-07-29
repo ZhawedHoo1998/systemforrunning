@@ -40,7 +40,7 @@ export interface User {
   id: string
   username: string
   display_name: string
-  role: "admin" | "writer"
+  role: "admin" | "manager" | "writer"
   is_active: boolean
   created_at: string
   updated_at: string
@@ -119,6 +119,345 @@ export async function updateUser(id: string, payload: UserUpdatePayload): Promis
   return res.json()
 }
 
+export interface TaskUser {
+  id: string
+  username: string
+  display_name: string
+  role: User["role"]
+  is_active: boolean
+}
+
+export interface RoleTarget {
+  role: "studio" | "manager" | "writer"
+  metric: string
+  target: string
+  unit?: string
+  notes?: string
+}
+
+export interface WeeklyGoal {
+  id: string
+  title: string
+  description: string | null
+  week_start: string
+  week_end: string
+  status: "draft" | "active" | "completed" | "archived"
+  role_targets: RoleTarget[]
+  task_count: number
+  completed_task_count: number
+  created_by_user_id: string
+  created_at: string
+  updated_at: string
+}
+
+export interface TaskFeedback {
+  id: string
+  task_id: string
+  user: TaskUser | null
+  feedback_type: "progress" | "completion"
+  content: string | null
+  attachments: Attachment[]
+  progress_percent: number | null
+  actual_metric_value: number | null
+  created_at: string
+}
+
+export interface WorkTask {
+  id: string
+  weekly_goal_id: string | null
+  weekly_goal: WeeklyGoal | null
+  title: string
+  description: string | null
+  category: string | null
+  priority: "urgent" | "high" | "normal" | "low"
+  status: "todo" | "in_progress" | "completed" | "cancelled"
+  timing_state: "overdue" | "due_today" | "due_soon" | "scheduled" | "completed" | "cancelled"
+  assignee: TaskUser | null
+  created_by: TaskUser | null
+  start_at: string | null
+  due_at: string
+  target_metric_label: string | null
+  target_metric_value: number | null
+  metric_unit: string | null
+  actual_metric_value: number | null
+  feedback_required: boolean
+  feedback_count: number
+  latest_progress_percent: number | null
+  feedbacks?: TaskFeedback[]
+  completed_at: string | null
+  created_at: string
+  updated_at: string
+}
+
+export interface TaskSummary {
+  total_active: number
+  overdue: number
+  due_today: number
+  urgent_high: number
+  completed_this_week: number
+  notification_count: number
+  notifications: Array<{
+    task_id: string
+    title: string
+    priority: WorkTask["priority"]
+    timing_state: WorkTask["timing_state"]
+    due_at: string
+    message: string
+  }>
+}
+
+export interface WeeklyGoalPayload {
+  title: string
+  description?: string
+  week_start: string
+  status: WeeklyGoal["status"]
+  role_targets: RoleTarget[]
+}
+
+export interface WorkTaskPayload {
+  weekly_goal_id?: string | null
+  title: string
+  description?: string
+  category?: string
+  priority: WorkTask["priority"]
+  assignee_user_id: string
+  start_at?: string | null
+  due_at: string
+  target_metric_label?: string
+  target_metric_value?: number | null
+  metric_unit?: string
+  feedback_required: boolean
+}
+
+export async function getTaskAssignees(): Promise<TaskUser[]> {
+  const res = await apiFetch(`${API_BASE}/api/tasks/assignees`)
+  if (!res.ok) await throwApiError(res, "任务负责人加载失败")
+  return res.json()
+}
+
+export async function getWeeklyGoals(weekStart?: string): Promise<WeeklyGoal[]> {
+  const sp = new URLSearchParams()
+  if (weekStart) sp.set("week_start", weekStart)
+  const res = await apiFetch(`${API_BASE}/api/tasks/goals?${sp.toString()}`)
+  if (!res.ok) await throwApiError(res, "周目标加载失败")
+  return res.json()
+}
+
+export async function createWeeklyGoal(payload: WeeklyGoalPayload): Promise<WeeklyGoal> {
+  const res = await apiFetch(`${API_BASE}/api/tasks/goals`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  })
+  if (!res.ok) await throwApiError(res, "周目标创建失败")
+  return res.json()
+}
+
+export async function updateWeeklyGoal(id: string, payload: Partial<WeeklyGoalPayload>): Promise<WeeklyGoal> {
+  const res = await apiFetch(`${API_BASE}/api/tasks/goals/${id}`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  })
+  if (!res.ok) await throwApiError(res, "周目标更新失败")
+  return res.json()
+}
+
+export async function getTaskSummary(mineOnly = false): Promise<TaskSummary> {
+  const res = await apiFetch(`${API_BASE}/api/tasks/summary?mine_only=${mineOnly}`)
+  if (!res.ok) await throwApiError(res, "任务提醒加载失败")
+  return res.json()
+}
+
+export async function getTasks(params: {
+  mine_only?: boolean
+  status?: string
+  weekly_goal_id?: string
+  assignee_user_id?: string
+} = {}): Promise<WorkTask[]> {
+  const sp = new URLSearchParams()
+  if (params.mine_only !== undefined) sp.set("mine_only", String(params.mine_only))
+  if (params.status) sp.set("status", params.status)
+  if (params.weekly_goal_id) sp.set("weekly_goal_id", params.weekly_goal_id)
+  if (params.assignee_user_id) sp.set("assignee_user_id", params.assignee_user_id)
+  const res = await apiFetch(`${API_BASE}/api/tasks?${sp.toString()}`)
+  if (!res.ok) await throwApiError(res, "任务列表加载失败")
+  return res.json()
+}
+
+export async function getTask(id: string): Promise<WorkTask> {
+  const res = await apiFetch(`${API_BASE}/api/tasks/${id}`)
+  if (!res.ok) await throwApiError(res, "任务详情加载失败")
+  return res.json()
+}
+
+export async function createWorkTask(payload: WorkTaskPayload): Promise<WorkTask> {
+  const res = await apiFetch(`${API_BASE}/api/tasks`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  })
+  if (!res.ok) await throwApiError(res, "任务创建失败")
+  return res.json()
+}
+
+export async function updateWorkTask(id: string, payload: Partial<WorkTaskPayload> & { status?: WorkTask["status"] }): Promise<WorkTask> {
+  const res = await apiFetch(`${API_BASE}/api/tasks/${id}`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  })
+  if (!res.ok) await throwApiError(res, "任务更新失败")
+  return res.json()
+}
+
+export async function updateWorkTaskStatus(id: string, status: "todo" | "in_progress"): Promise<WorkTask> {
+  const res = await apiFetch(`${API_BASE}/api/tasks/${id}/status`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ status }),
+  })
+  if (!res.ok) await throwApiError(res, "任务状态更新失败")
+  return res.json()
+}
+
+export async function submitTaskFeedback(id: string, payload: {
+  content?: string
+  progress_percent?: number
+  actual_metric_value?: number
+  complete: boolean
+  files: File[]
+}): Promise<WorkTask> {
+  const formData = new FormData()
+  if (payload.content) formData.append("content", payload.content)
+  if (payload.progress_percent !== undefined) formData.append("progress_percent", String(payload.progress_percent))
+  if (payload.actual_metric_value !== undefined) formData.append("actual_metric_value", String(payload.actual_metric_value))
+  formData.append("complete", String(payload.complete))
+  payload.files.forEach((file) => formData.append("files", file, file.name))
+  const res = await apiFetch(`${API_BASE}/api/tasks/${id}/feedback`, { method: "POST", body: formData })
+  if (!res.ok) await throwApiError(res, "任务反馈提交失败")
+  return res.json()
+}
+
+export interface CreatorAccountSampleNote {
+  id: string
+  title: string
+  content: string
+  cover_url: string
+  note_type: string
+  is_private: boolean
+  liked_count: number
+  comment_count: number
+  collected_count: number
+  share_count: number
+  tags: string[]
+  published_at: string | null
+}
+
+export interface CreatorAccountAnalysis {
+  version?: number
+  sample_count?: number
+  body_sample_count?: number
+  average_title_length?: number
+  average_body_length?: number
+  average_paragraphs?: number
+  average_likes?: number
+  average_comments?: number
+  positioning_summary?: string
+  style_summary?: string
+  hook_patterns?: Array<{ name: string; count: number; ratio: number }>
+  top_topics?: Array<{ name: string; count: number }>
+  top_notes?: Array<{
+    id: string
+    title: string
+    liked_count: number
+    comment_count: number
+    collected_count: number
+  }>
+  profile_metrics?: {
+    followers?: number
+    following?: number
+    total_engagement?: number
+  }
+  warnings?: string[]
+}
+
+export interface CreatorAccount {
+  id: string
+  name: string
+  xhs_user_id: string
+  red_id: string | null
+  nickname: string | null
+  avatar_url: string | null
+  profile_url: string | null
+  bio: string | null
+  ip_location: string | null
+  positioning: string | null
+  target_audience: string | null
+  tone_style: string | null
+  content_pillars: string[]
+  title_guidelines: string | null
+  body_guidelines: string | null
+  conversion_goal: string | null
+  prohibited_terms: string | null
+  profile_data: Record<string, unknown>
+  sample_notes: CreatorAccountSampleNote[]
+  analysis: CreatorAccountAnalysis
+  is_active: boolean
+  last_analyzed_at: string | null
+  created_at: string
+  updated_at: string
+}
+
+export interface CreatorAccountPayload {
+  name: string
+  xhs_user_id: string
+  positioning?: string
+  target_audience?: string
+  tone_style?: string
+  content_pillars: string[]
+  title_guidelines?: string
+  body_guidelines?: string
+  conversion_goal?: string
+  prohibited_terms?: string
+  is_active: boolean
+}
+
+export async function getCreatorAccounts(activeOnly = false): Promise<CreatorAccount[]> {
+  const res = await apiFetch(`${API_BASE}/api/creator-accounts?active_only=${activeOnly}`)
+  if (!res.ok) await throwApiError(res, "创作账号加载失败")
+  return res.json()
+}
+
+export async function createCreatorAccount(payload: CreatorAccountPayload): Promise<CreatorAccount> {
+  const res = await apiFetch(`${API_BASE}/api/creator-accounts`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  })
+  if (!res.ok) await throwApiError(res, "创作账号创建失败")
+  return res.json()
+}
+
+export async function updateCreatorAccount(
+  id: string,
+  payload: Partial<CreatorAccountPayload>,
+): Promise<CreatorAccount> {
+  const res = await apiFetch(`${API_BASE}/api/creator-accounts/${id}`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  })
+  if (!res.ok) await throwApiError(res, "创作账号更新失败")
+  return res.json()
+}
+
+export async function analyzeCreatorAccount(id: string): Promise<CreatorAccount> {
+  const res = await apiFetch(`${API_BASE}/api/creator-accounts/${id}/analyze`, { method: "POST" })
+  if (!res.ok) await throwApiError(res, "账号数据同步与分析失败")
+  return res.json()
+}
+
 export interface Material {
   id: string
   title: string
@@ -193,6 +532,14 @@ export interface MaterialsResponse {
   total: number
   page: number
   page_size: number
+}
+
+export interface DailyMaterialNotifications {
+  date: string
+  count: number
+  items: Material[]
+  has_more: boolean
+  cutoff: string
 }
 
 export interface Creation {
@@ -311,8 +658,9 @@ export interface AiDraft {
 }
 
 export interface AiConversation {
-  version: 1 | 2 | 3
+  version: 1 | 2 | 3 | 4
   task: AiTask
+  creator_account_id?: string | null
   messages: AiMessage[]
   selected_material_ids: string[]
   scope_filter: "all" | MaterialScope
@@ -345,6 +693,7 @@ export interface AiStatus {
 
 export interface AiChatRequest {
   task: AiTask
+  creator_account_id?: string
   brand?: string
   car_model?: string
   material_ids: string[]
@@ -359,6 +708,7 @@ function normalizeAiChatRequest(payload: AiChatRequest): AiChatRequest {
 
   return {
     ...payload,
+    creator_account_id: payload.creator_account_id || undefined,
     brand: payload.brand?.trim().slice(0, 200),
     car_model: payload.car_model?.trim().slice(0, 200),
     material_ids: payload.material_ids.slice(0, 12),
@@ -497,7 +847,9 @@ export async function createMaterial(formData: FormData): Promise<Material> {
     body: formData,
   })
   if (!res.ok) await throwApiError(res, "添加素材失败，请检查必填项")
-  return res.json()
+  const material = await res.json()
+  if (typeof window !== "undefined") window.dispatchEvent(new Event("ruby-rain:material-created"))
+  return material
 }
 
 export async function importXiaohongshuMaterial(shareText: string): Promise<XiaohongshuImportResult> {
@@ -544,6 +896,21 @@ export async function getRecent(limit = 30): Promise<Material[]> {
   const res = await apiFetch(`${API_BASE}/api/materials/recent?limit=${limit}`)
   if (!res.ok) await throwApiError(res, "最近素材加载失败")
   return res.json()
+}
+
+export async function getDailyMaterialNotifications(): Promise<DailyMaterialNotifications> {
+  const res = await apiFetch(`${API_BASE}/api/materials/notifications/daily`)
+  if (!res.ok) await throwApiError(res, "每日新增素材提醒加载失败")
+  return res.json()
+}
+
+export async function markDailyMaterialNotificationsSeen(seenThrough: string): Promise<void> {
+  const res = await apiFetch(`${API_BASE}/api/materials/notifications/daily/seen`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ seen_through: seenThrough }),
+  })
+  if (!res.ok) await throwApiError(res, "素材提醒确认失败")
 }
 
 export async function getOptions(): Promise<Options> {

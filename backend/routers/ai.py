@@ -15,7 +15,7 @@ from sqlalchemy.orm import Session
 
 from backend.auth import get_current_user, require_admin
 from backend.database import get_db
-from backend.models import AiFeedback, Material, User
+from backend.models import AiFeedback, CreatorAccount, Material, User
 
 try:
     from openai import AsyncOpenAI, OpenAIError
@@ -71,6 +71,7 @@ class ChatMessage(BaseModel):
 
 class ChatRequest(BaseModel):
     task: AiTask = "concept"
+    creator_account_id: Optional[str] = Field(default=None, max_length=36)
     brand: Optional[str] = Field(default=None, max_length=200)
     car_model: Optional[str] = Field(default=None, max_length=200)
     material_ids: list[str] = Field(default_factory=list, max_length=12)
@@ -269,7 +270,73 @@ def build_material_context(materials: list[Material]):
     return "\n\n".join(sections)
 
 
-def build_instructions(task: str, brand: Optional[str], car_model: Optional[str], context: str):
+def load_creator_account(db: Session, account_id: Optional[str]):
+    if not account_id:
+        return None
+    account = db.query(CreatorAccount).filter(
+        CreatorAccount.id == account_id,
+        CreatorAccount.is_active == True,
+    ).first()
+    if not account:
+        raise HTTPException(status_code=422, detail="选择的创作账号不存在或已停用")
+    return account
+
+
+def build_creator_account_context(account: Optional[CreatorAccount]):
+    if not account:
+        return ""
+    analysis = account.analysis or {}
+    profile_data = account.profile_data or {}
+    manual_fields = [
+        ("账号定位", account.positioning),
+        ("目标受众", account.target_audience),
+        ("语气与风格", account.tone_style),
+        ("内容支柱", "、".join(account.content_pillars or [])),
+        ("标题要求", account.title_guidelines),
+        ("正文要求", account.body_guidelines),
+        ("转化目标", account.conversion_goal),
+        ("禁用表达", account.prohibited_terms),
+    ]
+    lines = [
+        f"发布账号：{account.name}",
+        f"小红书昵称：{account.nickname or account.name}",
+        f"账号简介：{account.bio or '未填写'}",
+    ]
+    lines.extend(f"{label}：{value}" for label, value in manual_fields if value)
+    if analysis.get("positioning_summary"):
+        lines.append(f"公开笔记基础分析-内容：{analysis['positioning_summary']}")
+    if analysis.get("style_summary"):
+        lines.append(f"公开笔记基础分析-表达：{analysis['style_summary']}")
+    if profile_data.get("followers") is not None:
+        lines.append(
+            "账号公开数据："
+            f"粉丝 {profile_data.get('followers', 0)}，"
+            f"获赞与收藏 {profile_data.get('total_engagement', 0)}"
+        )
+    samples = []
+    for note in (account.sample_notes or [])[:6]:
+        if not isinstance(note, dict):
+            continue
+        title = str(note.get("title") or "").strip()
+        excerpt = str(note.get("content") or "").strip().replace("\n", " ")[:240]
+        if title or excerpt:
+            samples.append(f"- {title or '无标题'}：{excerpt}")
+    if samples:
+        lines.append("近期公开笔记样本：\n" + "\n".join(samples))
+    lines.append(
+        "适配要求：优先遵守管理员填写的账号规则；基础分析仅是有限样本观察。"
+        "沿用账号的表达节奏和内容侧重，但不要照抄历史句子，也不要虚构账号经历、数据或产品事实。"
+    )
+    return "\n".join(lines)
+
+
+def build_instructions(
+    task: str,
+    brand: Optional[str],
+    car_model: Optional[str],
+    context: str,
+    creator_account_context: str = "",
+):
     vehicle = " / ".join(filter(None, [brand, car_model])) or "未指定车型"
     parts = [
         load_writer_prompt(),
@@ -279,6 +346,8 @@ def build_instructions(task: str, brand: Optional[str], car_model: Optional[str]
     ]
     if context:
         parts.append("以下是写手主动选择的内部参考素材：\n" + context)
+    if creator_account_context:
+        parts.append("以下是本次内容要发布到的账号画像：\n" + creator_account_context)
     return "\n\n".join(parts)
 
 
@@ -480,11 +549,13 @@ async def chat(request: ChatRequest, db: Session = Depends(get_db)):
         raise HTTPException(status_code=503, detail="后台尚未配置 OPENAI_TEXT_MODEL")
     client = get_client(settings["api_key"], settings["base_url"])
     materials = load_materials(db, request.material_ids)
+    creator_account = load_creator_account(db, request.creator_account_id)
     instructions = build_instructions(
         request.task,
         request.brand,
         request.car_model,
         build_material_context(materials),
+        build_creator_account_context(creator_account),
     )
 
     async def event_stream():
@@ -596,11 +667,13 @@ async def create_writing_plan(request: ChatRequest, db: Session = Depends(get_db
         raise HTTPException(status_code=503, detail="后台尚未配置 OPENAI_TEXT_MODEL")
     client = get_client(settings["api_key"], settings["base_url"])
     materials = load_materials(db, request.material_ids)
+    creator_account = load_creator_account(db, request.creator_account_id)
     instructions = build_instructions(
         "concept",
         request.brand,
         request.car_model,
         build_material_context(materials),
+        build_creator_account_context(creator_account),
     ) + """
 
 你现在只负责整理可供写手选择的创作方案。标题之间必须有实质差异，内容方向需要具体到开头、语气和结构。

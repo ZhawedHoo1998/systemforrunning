@@ -147,6 +147,56 @@ def migrate_material_source_metadata():
             ))
 
 
+def migrate_creator_account_intelligence():
+    """Backfill public-data sync fields for existing creator accounts."""
+    inspector = inspect(engine)
+    if "creator_accounts" not in inspector.get_table_names():
+        return
+
+    columns = {column["name"] for column in inspector.get_columns("creator_accounts")}
+    definitions = {
+        "account_kind": "VARCHAR(20) DEFAULT 'owned'",
+        "data_source": "VARCHAR(20) DEFAULT 'auto'",
+        "last_sync_source": "VARCHAR(20)",
+        "last_sync_status": "VARCHAR(20) DEFAULT 'never'",
+        "last_sync_error": "TEXT",
+        "synced_note_count": "INTEGER DEFAULT 0",
+    }
+    with engine.begin() as connection:
+        for name, definition in definitions.items():
+            if name not in columns:
+                connection.execute(text(
+                    f"ALTER TABLE creator_accounts ADD COLUMN {name} {definition}"
+                ))
+
+        connection.execute(text("""
+            UPDATE creator_accounts
+            SET account_kind = 'owned'
+            WHERE account_kind IS NULL OR TRIM(account_kind) = ''
+        """))
+        connection.execute(text("""
+            UPDATE creator_accounts
+            SET data_source = 'auto'
+            WHERE data_source IS NULL OR TRIM(data_source) = ''
+        """))
+        connection.execute(text("""
+            UPDATE creator_accounts
+            SET last_sync_status = CASE
+                WHEN last_analyzed_at IS NULL THEN 'never'
+                ELSE 'success'
+            END
+            WHERE last_sync_status IS NULL OR TRIM(last_sync_status) = ''
+        """))
+        connection.execute(text("""
+            UPDATE creator_accounts
+            SET synced_note_count = CASE
+                WHEN sample_notes IS NULL THEN 0
+                ELSE synced_note_count
+            END
+            WHERE synced_note_count IS NULL
+        """))
+
+
 def migrate_ai_materials_to_creations():
     """Move legacy AI workspaces out of the material library on startup."""
     inspector = inspect(engine)

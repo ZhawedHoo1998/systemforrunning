@@ -22,6 +22,7 @@ import {
   ThumbsUp,
   Trash2,
   Type,
+  UserRound,
   X,
 } from "lucide-react"
 import { AiImageWorkspace } from "@/components/AiImageWorkspace"
@@ -52,6 +53,7 @@ import {
   generateAiImage,
   generateAiWritingPlan,
   getAiStatus,
+  getCreatorAccounts,
   getCreation,
   getMaterial,
   getMaterials,
@@ -61,6 +63,7 @@ import {
   uploadAiReferenceImages,
   updateCreation,
   type Creation,
+  type CreatorAccount,
   type AiMessage,
   type AiImageMessage,
   type AiImageThread,
@@ -141,6 +144,7 @@ function cleanAiMessages(messages: AiMessage[] | null | undefined): AiMessage[] 
 
 function createWorkspaceSnapshot({
   task,
+  selectedCreatorAccountId,
   messages,
   input,
   selectedMaterialIds,
@@ -155,6 +159,7 @@ function createWorkspaceSnapshot({
   noteTitle,
 }: {
   task: AiTask
+  selectedCreatorAccountId: string
   messages: AiMessage[]
   input: string
   selectedMaterialIds: string[]
@@ -170,6 +175,7 @@ function createWorkspaceSnapshot({
 }) {
   return JSON.stringify({
     task,
+    creator_account_id: selectedCreatorAccountId,
     messages,
     input,
     selected_material_ids: selectedMaterialIds,
@@ -206,6 +212,8 @@ async function attachmentToFile(attachment: Attachment) {
 
 export default function AiStudioPage() {
   const [status, setStatus] = useState<AiStatus | null>(null)
+  const [creatorAccounts, setCreatorAccounts] = useState<CreatorAccount[]>([])
+  const [selectedCreatorAccountId, setSelectedCreatorAccountId] = useState("")
   const [vehicles, setVehicles] = useState<VehicleOption[]>([])
   const [scopeFilter, setScopeFilter] = useState<"all" | MaterialScope>("all")
   const [materialSearch, setMaterialSearch] = useState("")
@@ -248,11 +256,12 @@ export default function AiStudioPage() {
 
   useEffect(() => {
     let active = true
-    Promise.all([getAiStatus(), getOptions()])
-      .then(([statusResult, optionsResult]) => {
+    Promise.all([getAiStatus(), getOptions(), getCreatorAccounts(true)])
+      .then(([statusResult, optionsResult, accountResults]) => {
         if (!active) return
         setStatus(statusResult)
         setVehicles(optionsResult.vehicles)
+        setCreatorAccounts(accountResults)
       })
       .catch((error) => {
         if (active) setChatError(error instanceof Error ? error.message : "AI 创作台加载失败")
@@ -318,6 +327,7 @@ export default function AiStudioPage() {
         setResumedCreationId(creation.id)
         setResumedTitle(creation.title)
         setTask(conversation.task)
+        setSelectedCreatorAccountId(conversation.creator_account_id || "")
         setMessages(restoredMessages)
         setSelectedMaterials(restoredMaterials)
         setScopeFilter(conversation.scope_filter || "all")
@@ -343,6 +353,7 @@ export default function AiStudioPage() {
         setSavedCreation(null)
         setSavedWorkspaceSnapshot(createWorkspaceSnapshot({
           task: conversation.task,
+          selectedCreatorAccountId: conversation.creator_account_id || "",
           messages: restoredMessages,
           input: "",
           selectedMaterialIds: restoredMaterials.map((material) => material.id),
@@ -408,6 +419,10 @@ export default function AiStudioPage() {
   const selectedMaterialIds = useMemo(
     () => selectedMaterials.map((material) => material.id),
     [selectedMaterials]
+  )
+  const selectedCreatorAccount = useMemo(
+    () => creatorAccounts.find((account) => account.id === selectedCreatorAccountId) ?? null,
+    [creatorAccounts, selectedCreatorAccountId]
   )
   const selectedMaterialImages = useMemo(() => {
     const seen = new Set<string>()
@@ -479,6 +494,7 @@ export default function AiStudioPage() {
   const canSaveIdea = Boolean(latestAssistant || hasImageResults || draft.title.trim() || draft.content.trim())
   const workspaceSnapshot = useMemo(() => createWorkspaceSnapshot({
     task,
+    selectedCreatorAccountId,
     messages,
     input,
     selectedMaterialIds,
@@ -493,6 +509,7 @@ export default function AiStudioPage() {
     noteTitle,
   }), [
     task,
+    selectedCreatorAccountId,
     messages,
     input,
     selectedMaterialIds,
@@ -682,6 +699,7 @@ export default function AiStudioPage() {
     try {
       const request = {
         task,
+        creator_account_id: selectedCreatorAccountId || undefined,
         brand: selectedBrand,
         car_model: selectedCarModel,
         material_ids: selectedMaterialIds,
@@ -801,6 +819,7 @@ export default function AiStudioPage() {
       await streamAiChat(
         {
           task: "note",
+          creator_account_id: selectedCreatorAccountId || undefined,
           brand: selectedBrand,
           car_model: selectedCarModel,
           material_ids: selectedMaterialIds,
@@ -1025,8 +1044,9 @@ export default function AiStudioPage() {
     const title = draft.title.trim() || noteTitle.trim() || deriveTitle(savedContent, selectedCarModel)
     const activeReference = activeImageThread?.selected_references[0] ?? null
     const conversation = {
-      version: 3 as const,
+      version: 4 as const,
       task,
+      creator_account_id: selectedCreatorAccountId || null,
       messages: messagesToSave,
       selected_material_ids: selectedMaterialIds,
       scope_filter: scopeFilter,
@@ -1070,6 +1090,7 @@ export default function AiStudioPage() {
     formData.append("original_content", draft.content.trim() || latestAssistant || imageRequirements)
     formData.append("tags", JSON.stringify([
       "AI生成",
+      selectedCreatorAccount?.name,
       selectedBrand,
       selectedCarModel,
       selectedTask.label,
@@ -1089,6 +1110,7 @@ export default function AiStudioPage() {
       setNoteTitle(title)
       setSavedWorkspaceSnapshot(createWorkspaceSnapshot({
         task,
+        selectedCreatorAccountId,
         messages: messagesToSave,
         input,
         selectedMaterialIds,
@@ -1145,6 +1167,7 @@ export default function AiStudioPage() {
     if (hasUnsavedChanges && !window.confirm("当前 AI 创作尚未保存，清空后无法恢复。确定清空吗？")) return
 
     setTask("concept")
+    setSelectedCreatorAccountId("")
     setMessages([])
     setInput("")
     setSelectedMaterials([])
@@ -1186,6 +1209,7 @@ export default function AiStudioPage() {
           <div className="min-w-0">
             <h2 className="text-sm font-semibold">专注 AI 对话</h2>
             <p className="truncate text-xs text-muted-foreground">
+              {selectedCreatorAccount ? `${selectedCreatorAccount.name} · ` : ""}
               {selectedMaterialIds.length} 条参考素材{selectedCarModel ? ` · ${selectedCarModel}` : ""}
             </p>
           </div>
@@ -1354,6 +1378,7 @@ export default function AiStudioPage() {
             </Button>
           </div>
           <p className="mt-2 text-xs text-muted-foreground">
+            {selectedCreatorAccount ? `${selectedCreatorAccount.name} · ` : ""}
             {selectedBrand && selectedCarModel ? `${selectedBrand} · ${selectedCarModel} · ` : ""}
             {selectedMaterialIds.length} 条参考素材
           </p>
@@ -1407,6 +1432,57 @@ export default function AiStudioPage() {
             {chatError}
           </div>
         )}
+
+        <section className="mb-5 grid gap-3 border-y bg-card px-4 py-3 sm:grid-cols-[minmax(220px,320px)_minmax(0,1fr)] sm:items-center" aria-labelledby="creator-account-heading">
+          <div className="space-y-1.5">
+            <label id="creator-account-heading" className="flex items-center gap-2 text-sm font-semibold">
+              <UserRound className="size-4 text-primary" />
+              发布账号
+            </label>
+            <Select
+              value={selectedCreatorAccountId || "__none__"}
+              onValueChange={(value) => {
+                setSelectedCreatorAccountId(value === "__none__" ? "" : value)
+                setSavedCreation(null)
+              }}
+              disabled={creatorAccounts.length === 0}
+            >
+              <SelectTrigger aria-label="选择发布账号" className="bg-background shadow-none">
+                <SelectValue placeholder="选择发布账号" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="__none__">不指定账号（通用创作）</SelectItem>
+                {creatorAccounts.map((account) => (
+                  <SelectItem key={account.id} value={account.id}>
+                    {account.name}{account.nickname && account.nickname !== account.name ? ` · ${account.nickname}` : ""}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
+
+          {selectedCreatorAccount ? (
+            <div className="min-w-0 border-l-2 border-primary/30 pl-3">
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="text-sm font-medium">{selectedCreatorAccount.name}</span>
+                <Badge variant="outline">{selectedCreatorAccount.analysis.sample_count || 0} 篇样本</Badge>
+                {selectedCreatorAccount.content_pillars.slice(0, 3).map((pillar) => (
+                  <Badge key={pillar} variant="secondary">{pillar}</Badge>
+                ))}
+              </div>
+              <p className="mt-1 line-clamp-2 text-xs leading-5 text-muted-foreground">
+                {selectedCreatorAccount.positioning
+                  || selectedCreatorAccount.analysis.positioning_summary
+                  || selectedCreatorAccount.bio
+                  || "账号画像尚未补充"}
+              </p>
+            </div>
+          ) : (
+            <p className="text-xs text-muted-foreground">
+              {creatorAccounts.length ? "当前按通用小红书写作规则创作" : "后台尚未配置可用的创作账号"}
+            </p>
+          )}
+        </section>
 
         <div className="grid items-start gap-5 lg:grid-cols-[230px_minmax(0,1fr)] xl:grid-cols-[230px_minmax(520px,1.25fr)_minmax(360px,0.75fr)]">
           <aside className="overflow-hidden rounded-lg border bg-card" aria-label="创作参考">

@@ -3,15 +3,16 @@ import os
 import mimetypes
 import json
 import aiofiles
+from datetime import datetime, time, timedelta, timezone
 from typing import Optional, List
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form
 from sqlalchemy.orm import Session
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 
 from backend.database import get_db
 from backend import crud
 from backend.auth import get_current_user
-from backend.models import User
+from backend.models import Material, MaterialNotificationState, User
 
 router = APIRouter(
     prefix="/api/materials",
@@ -27,6 +28,8 @@ MAX_UPLOAD_SIZE = 200 * 1024 * 1024
 MAX_UPLOAD_SIZE_MB = MAX_UPLOAD_SIZE // (1024 * 1024)
 VIDEO_EXTENSIONS = {".m4v", ".mov", ".mp4", ".webm"}
 MATERIAL_SCOPES = {"vehicle", "general"}
+CHINA_TIMEZONE = timezone(timedelta(hours=8))
+DAILY_NOTIFICATION_LIMIT = 50
 
 
 class MaterialCreate(BaseModel):
@@ -67,6 +70,17 @@ class MaterialUpdate(BaseModel):
     source_metadata: Optional[dict] = None
 
 
+class MaterialNotificationSeenRequest(BaseModel):
+    seen_through: datetime
+
+    @field_validator("seen_through")
+    @classmethod
+    def normalize_seen_through(cls, value: datetime):
+        if value.tzinfo:
+            return value.astimezone(timezone.utc).replace(tzinfo=None)
+        return value
+
+
 def material_to_dict(material, is_favorite: bool = False):
     return {
         "id": str(material.id),
@@ -91,6 +105,17 @@ def material_to_dict(material, is_favorite: bool = False):
         "created_at": material.created_at.isoformat() if material.created_at else None,
         "updated_at": material.updated_at.isoformat() if material.updated_at else None,
     }
+
+
+def daily_material_window(now_utc: datetime) -> tuple[str, datetime]:
+    local_date = now_utc.replace(tzinfo=timezone.utc).astimezone(CHINA_TIMEZONE).date()
+    local_start = datetime.combine(local_date, time.min, tzinfo=CHINA_TIMEZONE)
+    utc_start = local_start.astimezone(timezone.utc).replace(tzinfo=None)
+    return local_date.isoformat(), utc_start
+
+
+def utc_iso(value: datetime) -> str:
+    return f"{value.isoformat()}Z"
 
 
 def normalize_scope_fields(
@@ -263,6 +288,69 @@ async def list_recent(
         material_to_dict(material, material.id in favorite_ids)
         for material in materials
     ]
+
+
+@router.get("/notifications/daily")
+async def get_daily_material_notifications(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    now_utc = datetime.now(timezone.utc).replace(tzinfo=None)
+    local_date, day_start_utc = daily_material_window(now_utc)
+    state = db.query(MaterialNotificationState).filter(
+        MaterialNotificationState.user_id == current_user.id
+    ).first()
+    query = db.query(Material).filter(
+        Material.created_at >= day_start_utc,
+        Material.created_at <= now_utc,
+    )
+    if state and state.seen_through:
+        query = query.filter(Material.created_at > state.seen_through)
+    total = query.count()
+    materials = (
+        query.order_by(Material.created_at.desc())
+        .limit(DAILY_NOTIFICATION_LIMIT)
+        .all()
+    )
+    favorite_ids = crud.get_favorite_material_ids(
+        db,
+        current_user.id,
+        [material.id for material in materials],
+    )
+    return {
+        "date": local_date,
+        "count": total,
+        "items": [
+            material_to_dict(material, material.id in favorite_ids)
+            for material in materials
+        ],
+        "has_more": total > len(materials),
+        "cutoff": utc_iso(now_utc),
+    }
+
+
+@router.post("/notifications/daily/seen")
+async def mark_daily_material_notifications_seen(
+    payload: MaterialNotificationSeenRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    now_utc = datetime.now(timezone.utc).replace(tzinfo=None)
+    _, day_start_utc = daily_material_window(now_utc)
+    seen_through = min(max(payload.seen_through, day_start_utc), now_utc)
+    state = db.query(MaterialNotificationState).filter(
+        MaterialNotificationState.user_id == current_user.id
+    ).first()
+    if not state:
+        state = MaterialNotificationState(
+            user_id=current_user.id,
+            seen_through=seen_through,
+        )
+        db.add(state)
+    elif not state.seen_through or seen_through > state.seen_through:
+        state.seen_through = seen_through
+    db.commit()
+    return {"status": "ok", "seen_through": utc_iso(state.seen_through)}
 
 
 @router.get("/options")
