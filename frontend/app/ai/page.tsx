@@ -23,7 +23,6 @@ import {
   ThumbsDown,
   ThumbsUp,
   Trash2,
-  Type,
   UserRound,
   X,
 } from "lucide-react"
@@ -86,9 +85,8 @@ import { isImageAttachment } from "@/lib/materials"
 import { cn } from "@/lib/utils"
 
 const TASKS = [
-  { value: "concept" as const, label: "创作方案", icon: Sparkles, placeholder: "说说这篇新笔记的核心想法、想表达的情绪或场景。" },
-  { value: "title" as const, label: "生成标题", icon: Type, placeholder: "围绕所选素材生成 10 个标题，突出真实痛点和使用场景。" },
-  { value: "note" as const, label: "小红书正文", icon: FileText, placeholder: "根据所选素材写一篇完整的小红书笔记。" },
+  { value: "concept" as const, label: "讨论创意", icon: Sparkles, placeholder: "先说说你想写的内容，AI 会和你逐步确认参考点、车型与帖子目标。" },
+  { value: "note" as const, label: "正文打磨", icon: FileText, placeholder: "继续讨论正文结构、卖点表达或需要补充的事实。" },
   { value: "video" as const, label: "视频脚本", icon: Clapperboard, placeholder: "生成一条 60 秒短视频脚本，包含前三秒钩子和分镜。" },
   { value: "rewrite" as const, label: "内容改写", icon: RefreshCw, placeholder: "请根据所选素材重新组织表达，避免照搬原文。" },
 ]
@@ -250,6 +248,8 @@ export default function AiStudioPage() {
   const [uploadingReferences, setUploadingReferences] = useState(false)
   const [writingPlans, setWritingPlans] = useState<AiWritingPlan[]>([])
   const [activeWritingPlanId, setActiveWritingPlanId] = useState<string | null>(null)
+  const [generatingPlan, setGeneratingPlan] = useState(false)
+  const [planProgress, setPlanProgress] = useState("")
   const [draft, setDraft] = useState<AiDraft>(() => createEmptyDraft())
   const [writingWorkspaceMode, setWritingWorkspaceMode] = useState<WritingWorkspaceMode>("chat")
   const [exportingPackage, setExportingPackage] = useState(false)
@@ -554,6 +554,8 @@ export default function AiStudioPage() {
   const selectedTask = TASKS.find((item) => item.value === task) ?? TASKS[0]
   const chatReady = Boolean(status?.chat_configured)
   const imageReady = Boolean(status?.image_configured)
+  const canGeneratePlan = messages.some((message) => message.role === "user" && message.content.trim())
+    && messages.some((message) => message.role === "assistant" && message.content.trim())
   const hasImageResults = generatedImages.length > 0
   const canSaveIdea = Boolean(latestAssistant || hasImageResults || draft.title.trim() || draft.content.trim())
   const workspaceSnapshot = useMemo(() => createWorkspaceSnapshot({
@@ -790,7 +792,7 @@ export default function AiStudioPage() {
   const handleSend = async (event: FormEvent) => {
     event.preventDefault()
     const content = input.trim()
-    if (!content || !chatReady || streaming) return
+    if (!content || !chatReady || streaming || generatingPlan) return
 
     const nextMessages: AiMessage[] = [...messages, { role: "user", content }]
     const assistantIndex = nextMessages.length
@@ -814,41 +816,51 @@ export default function AiStudioPage() {
         creator_note_ids: selectedCreatorNoteIds,
         messages: nextMessages,
       }
-      if (task === "concept" || task === "title") {
-        const plan = await generateAiWritingPlan(request)
-        fullResponse = `已整理 ${plan.titles.length} 个标题和 ${plan.directions.length} 个内容方向，请在“方案选择”中确定后继续写作。`
-        setWritingPlans((current) => [...current, plan])
-        setActiveWritingPlanId(plan.id)
-        setWritingWorkspaceMode("plan")
-        const recommendedTitle = plan.titles.find((title) => title.id === plan.recommended_title_id)
-        if (recommendedTitle && !noteTitle) setNoteTitle(recommendedTitle.text)
-        setMessages((current) => current.map((message, index) =>
-          index === assistantIndex
-            ? { role: "assistant", content: fullResponse }
-            : message
-        ))
-      } else {
-        await streamAiChat(
-          request,
-          (delta) => {
-            fullResponse += delta
-            setMessages((current) => current.map((message, index) =>
-              index === assistantIndex
-                ? { role: "assistant", content: fullResponse }
-                : message
-            ))
-          },
-          setChatError,
-        )
-      }
-      if (fullResponse && !noteTitle && task !== "concept" && task !== "title") {
-        setNoteTitle(deriveTitle(fullResponse, selectedCarModel))
-      }
+      await streamAiChat(
+        request,
+        (delta) => {
+          fullResponse += delta
+          setMessages((current) => current.map((message, index) =>
+            index === assistantIndex
+              ? { role: "assistant", content: fullResponse }
+              : message
+          ))
+        },
+        setChatError,
+      )
     } catch (error) {
       setMessages((current) => current.filter((_, index) => index !== assistantIndex))
       setChatError(error instanceof Error ? error.message : "AI 对话请求失败")
     } finally {
       setStreaming(false)
+    }
+  }
+
+  const handleGenerateWritingPlan = async () => {
+    if (!chatReady || !canGeneratePlan || streaming || generatingPlan) return
+
+    setGeneratingPlan(true)
+    setPlanProgress("正在整理标题、内容方向与首图建议")
+    setChatError("")
+    setSavedCreation(null)
+    try {
+      const plan = await generateAiWritingPlan({
+        task: "concept",
+        creator_account_id: selectedCreatorAccountId || undefined,
+        brand: selectedBrand,
+        car_model: selectedCarModel,
+        material_ids: selectedMaterialIds,
+        creator_note_ids: selectedCreatorNoteIds,
+        messages: cleanAiMessages(messages),
+      }, setPlanProgress)
+      setWritingPlans((current) => [...current, plan])
+      setActiveWritingPlanId(plan.id)
+      setWritingWorkspaceMode("plan")
+    } catch (error) {
+      setChatError(error instanceof Error ? error.message : "AI 创作方案整理失败")
+    } finally {
+      setGeneratingPlan(false)
+      setPlanProgress("")
     }
   }
 
@@ -880,7 +892,7 @@ export default function AiStudioPage() {
   }
 
   const handleDevelopDraft = () => {
-    if (!activeWritingPlan || !activeWritingPlan.selected_title_id || streaming) return
+    if (!activeWritingPlan || !activeWritingPlan.selected_title_id || streaming || generatingPlan) return
     const selectedTitle = activeWritingPlan.titles.find(
       (title) => title.id === activeWritingPlan.selected_title_id
     )
@@ -1265,6 +1277,8 @@ export default function AiStudioPage() {
     setGeneratingImageThreadId(null)
     setWritingPlans([])
     setActiveWritingPlanId(null)
+    setGeneratingPlan(false)
+    setPlanProgress("")
     setDraft(createEmptyDraft())
     setWritingWorkspaceMode("chat")
     setExportingPackage(false)
@@ -1300,7 +1314,7 @@ export default function AiStudioPage() {
 
       <div className={cn("border-b p-3", expanded && "px-5 py-3 sm:px-6")}>
         <div className="flex items-start gap-2">
-          <div className="grid min-w-0 flex-1 grid-cols-2 gap-1 sm:grid-cols-3 lg:flex" role="tablist" aria-label="创作任务">
+          <div className="grid min-w-0 flex-1 grid-cols-2 gap-1 sm:grid-cols-4 lg:flex" role="tablist" aria-label="创作任务">
             {TASKS.map(({ value, label, icon: Icon }) => (
               <button
                 key={value}
@@ -1308,8 +1322,9 @@ export default function AiStudioPage() {
                 role="tab"
                 aria-selected={task === value}
                 onClick={() => setTask(value)}
+                disabled={streaming || generatingPlan}
                 className={cn(
-                  "flex h-9 min-w-0 items-center justify-center gap-1.5 rounded-md px-3 text-xs font-medium text-muted-foreground transition-colors last:col-span-2 sm:last:col-span-1",
+                  "flex h-9 min-w-0 items-center justify-center gap-1.5 rounded-md px-3 text-xs font-medium text-muted-foreground transition-colors disabled:opacity-50",
                   task === value && "bg-accent text-accent-foreground"
                 )}
               >
@@ -1342,7 +1357,7 @@ export default function AiStudioPage() {
                 <Sparkles className="size-5" />
               </span>
               <h2 className="text-sm font-semibold">{selectedTask.label}</h2>
-              <p className="mt-1 max-w-sm text-xs leading-5 text-muted-foreground">描述你想写的内容、场景或表达方向</p>
+              <p className="mt-1 max-w-sm text-xs leading-5 text-muted-foreground">先说想法，AI 会逐步确认参考重点、车型、内容目标和带货强度</p>
             </div>
           ) : messages.map((message, index) => (
             <div
@@ -1452,18 +1467,32 @@ export default function AiStudioPage() {
               type="submit"
               size="icon"
               className="size-10 shrink-0"
-              disabled={!chatReady || !input.trim() || streaming}
+              disabled={!chatReady || !input.trim() || streaming || generatingPlan}
               aria-label="发送创作要求"
               title="发送"
             >
               {streaming ? <LoaderCircle className="animate-spin" /> : <Send />}
             </Button>
           </div>
-          <p className="mt-2 text-xs text-muted-foreground">
-            {selectedCreatorAccount ? `${selectedCreatorAccount.name} · ` : ""}
-            {selectedBrand && selectedCarModel ? `${selectedBrand} · ${selectedCarModel} · ` : ""}
-            {selectedMaterialIds.length} 条素材 · {selectedCreatorNoteIds.length} 篇账号旧帖
-          </p>
+          <div className="mt-2 flex flex-wrap items-center justify-between gap-2">
+            <p className="text-xs text-muted-foreground">
+              {selectedCreatorAccount ? `${selectedCreatorAccount.name} · ` : ""}
+              {selectedBrand && selectedCarModel ? `${selectedBrand} · ${selectedCarModel} · ` : ""}
+              {selectedMaterialIds.length} 条素材 · {selectedCreatorNoteIds.length} 篇账号旧帖
+            </p>
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              className="h-8 min-w-[190px] shrink-0 justify-center"
+              onClick={() => void handleGenerateWritingPlan()}
+              disabled={!chatReady || !canGeneratePlan || streaming || generatingPlan}
+              title={canGeneratePlan ? "根据当前讨论整理方案" : "先和 AI 完成一轮讨论"}
+            >
+              {generatingPlan ? <LoaderCircle className="animate-spin" /> : <ListChecks />}
+              {generatingPlan ? (planProgress || "正在整理") : "整理标题与创作方案"}
+            </Button>
+          </div>
         </form>
       </div>
     </div>

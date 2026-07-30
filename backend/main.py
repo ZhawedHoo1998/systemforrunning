@@ -41,12 +41,20 @@ async def lifespan(_: FastAPI):
     archive_task = asyncio.create_task(
         creator_accounts.resume_incomplete_owned_account_archives()
     )
+    ai_warmup_task = asyncio.create_task(ai.warm_text_client())
     try:
         yield
     finally:
         stop_event.set()
         archive_task.cancel()
-        await asyncio.gather(monitor_task, archive_task, return_exceptions=True)
+        ai_warmup_task.cancel()
+        await asyncio.gather(
+            monitor_task,
+            archive_task,
+            ai_warmup_task,
+            return_exceptions=True,
+        )
+        await ai.close_clients()
 
 
 app = FastAPI(

@@ -1,7 +1,9 @@
 import unittest
 from datetime import datetime
+from unittest.mock import patch
 
 from backend.models import CreatorAccount, CreatorAccountNote
+from backend.routers import ai as ai_router
 from backend.routers.ai import ChatRequest, build_creator_note_context, build_image_prompt
 from backend.routers.creator_accounts import _history_archive_summary
 from backend.routers.creator_accounts import (
@@ -11,6 +13,9 @@ from backend.routers.creator_accounts import (
 
 
 class AiCreatorNoteContextTests(unittest.TestCase):
+    def tearDown(self):
+        ai_router._openai_clients.clear()
+
     def test_chat_request_normalizes_creator_note_ids(self):
         request = ChatRequest(
             creator_note_ids=[" note-2 ", "note-1", "note-2", ""],
@@ -84,6 +89,24 @@ class AiCreatorNoteContextTests(unittest.TestCase):
         self.assertIn("正文：完整正文内容", prompt)
         self.assertIn("标签：车载香氛、夏日用车", prompt)
         self.assertIn("赞 88、藏 21、评 9、转 5", prompt)
+
+    @patch.object(ai_router, "AsyncOpenAI")
+    def test_openai_client_is_reused_for_the_same_relay(self, openai_client):
+        client = object()
+        openai_client.return_value = client
+
+        first = ai_router.get_client("test-key", "https://relay.example/v1")
+        second = ai_router.get_client("test-key", "https://relay.example/v1")
+
+        self.assertIs(first, client)
+        self.assertIs(second, client)
+        openai_client.assert_called_once()
+
+    def test_writing_plan_schema_limits_response_size(self):
+        properties = ai_router.WRITING_PLAN_SCHEMA["properties"]
+
+        self.assertEqual(properties["titles"]["maxItems"], 8)
+        self.assertEqual(properties["directions"]["maxItems"], 4)
 
 
 class CreatorHistoryArchiveTests(unittest.TestCase):

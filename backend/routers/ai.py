@@ -1,7 +1,9 @@
+import asyncio
 import base64
 import json
 import logging
 import os
+import time
 import uuid
 from datetime import datetime
 from typing import Literal, Optional
@@ -32,6 +34,8 @@ router = APIRouter(
     dependencies=[Depends(get_current_user)],
 )
 logger = logging.getLogger(__name__)
+metrics_logger = logging.getLogger("uvicorn.error")
+_openai_clients: dict[tuple[str, str], object] = {}
 
 UPLOAD_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "uploads")
 os.makedirs(UPLOAD_DIR, exist_ok=True)
@@ -129,7 +133,7 @@ WRITING_PLAN_SCHEMA = {
         "titles": {
             "type": "array",
             "minItems": 6,
-            "maxItems": 12,
+            "maxItems": 8,
             "items": {
                 "type": "object",
                 "additionalProperties": False,
@@ -144,7 +148,7 @@ WRITING_PLAN_SCHEMA = {
         "directions": {
             "type": "array",
             "minItems": 3,
-            "maxItems": 5,
+            "maxItems": 4,
             "items": {
                 "type": "object",
                 "additionalProperties": False,
@@ -234,12 +238,54 @@ def get_client(api_key: str, base_url: str):
         raise HTTPException(status_code=503, detail="后端尚未安装 OpenAI SDK")
     if not api_key:
         raise HTTPException(status_code=503, detail="后台尚未配置 OPENAI_API_KEY")
-    # This OpenAI-compatible relay rejects the SDK's default User-Agent.
-    return AsyncOpenAI(
-        api_key=api_key,
-        base_url=base_url,
-        default_headers={"User-Agent": "python-httpx"},
-    )
+    cache_key = (api_key, base_url)
+    client = _openai_clients.get(cache_key)
+    if client is None:
+        # This OpenAI-compatible relay rejects the SDK's default User-Agent.
+        client = AsyncOpenAI(
+            api_key=api_key,
+            base_url=base_url,
+            default_headers={"User-Agent": "python-httpx"},
+        )
+        _openai_clients[cache_key] = client
+    return client
+
+
+async def warm_text_client():
+    settings = get_settings()
+    if not settings["api_key"] or not settings["text_model"]:
+        return
+    started = time.perf_counter()
+    client = get_client(settings["api_key"], settings["base_url"])
+    for attempt in range(1, 4):
+        try:
+            await client.models.list()
+            metrics_logger.info(
+                "AI relay connection warmed in %.2fs for model %s attempt=%d",
+                time.perf_counter() - started,
+                settings["text_model"],
+                attempt,
+            )
+            return
+        except Exception:
+            if attempt == 3:
+                logger.warning("AI relay connection warm-up failed after 3 attempts", exc_info=True)
+                return
+            metrics_logger.warning(
+                "AI relay connection warm-up attempt %d failed; retrying",
+                attempt,
+            )
+            await asyncio.sleep(attempt * 2)
+
+
+async def close_clients():
+    clients = list(_openai_clients.values())
+    _openai_clients.clear()
+    if clients:
+        await asyncio.gather(
+            *(client.close() for client in clients),
+            return_exceptions=True,
+        )
 
 
 def load_materials(db: Session, material_ids: list[str]):
@@ -692,9 +738,15 @@ async def chat(request: ChatRequest, db: Session = Depends(get_db)):
     )
 
     async def event_stream():
+        started = time.perf_counter()
+        first_text_at = None
         emitted_text = ""
         terminal_message = ""
         try:
+            yield "data: " + json.dumps(
+                {"type": "progress", "message": "已提交模型，正在生成"},
+                ensure_ascii=False,
+            ) + "\n\n"
             for attempt_index in range(2):
                 try:
                     stream = await client.responses.create(
@@ -710,6 +762,15 @@ async def chat(request: ChatRequest, db: Session = Depends(get_db)):
                             delta = getattr(event, "delta", None)
                             if not isinstance(delta, str) or not delta:
                                 continue
+                            if first_text_at is None:
+                                first_text_at = time.perf_counter()
+                                metrics_logger.info(
+                                    "AI chat first text in %.2fs model=%s materials=%d creator_notes=%d",
+                                    first_text_at - started,
+                                    settings["text_model"],
+                                    len(materials),
+                                    len(creator_notes),
+                                )
                             emitted_text += delta
                             payload = json.dumps(
                                 {"type": "delta", "delta": delta},
@@ -723,6 +784,8 @@ async def chat(request: ChatRequest, db: Session = Depends(get_db)):
                             except (AttributeError, TypeError, ValueError):
                                 completed_text = ""
                             if completed_text:
+                                if first_text_at is None:
+                                    first_text_at = time.perf_counter()
                                 emitted_text = completed_text
                                 payload = json.dumps(
                                     {"type": "delta", "delta": completed_text},
@@ -784,7 +847,12 @@ async def chat(request: ChatRequest, db: Session = Depends(get_db)):
             )
             yield f"data: {payload}\n\n"
         finally:
-            await client.close()
+            metrics_logger.info(
+                "AI chat finished in %.2fs model=%s output_chars=%d",
+                time.perf_counter() - started,
+                settings["text_model"],
+                len(emitted_text),
+            )
 
     return StreamingResponse(
         event_stream(),
@@ -814,9 +882,12 @@ async def create_writing_plan(request: ChatRequest, db: Session = Depends(get_db
 你现在只负责整理可供写手选择的创作方案。标题之间必须有实质差异，内容方向需要具体到开头、语气和结构。
 不要直接写完整正文，不要编造素材中没有的产品参数、用户反馈或活动规则。"""
 
-    plan_token_budget = min(max(settings["max_output_tokens"], 6000), 10000)
+    plan_token_budget = min(max(settings["max_output_tokens"], 2500), 5000)
 
     async def event_stream():
+        started = time.perf_counter()
+        first_text_at = None
+        output_size = 0
         try:
             yield "data: " + json.dumps(
                 {"type": "progress", "message": "正在整理标题与内容方向"},
@@ -861,6 +932,15 @@ async def create_writing_plan(request: ChatRequest, db: Session = Depends(get_db
                         if event_type == "response.output_text.delta":
                             delta = getattr(event, "delta", None)
                             if isinstance(delta, str) and delta:
+                                if first_text_at is None:
+                                    first_text_at = time.perf_counter()
+                                    metrics_logger.info(
+                                        "AI writing plan first text in %.2fs model=%s materials=%d creator_notes=%d",
+                                        first_text_at - started,
+                                        settings["text_model"],
+                                        len(materials),
+                                        len(creator_notes),
+                                    )
                                 output_parts.append(delta)
                                 output_size += len(delta)
                                 if output_size >= next_progress_size:
@@ -915,7 +995,12 @@ async def create_writing_plan(request: ChatRequest, db: Session = Depends(get_db
                 ensure_ascii=False,
             ) + "\n\n"
         finally:
-            await client.close()
+            metrics_logger.info(
+                "AI writing plan finished in %.2fs model=%s output_chars=%d",
+                time.perf_counter() - started,
+                settings["text_model"],
+                output_size,
+            )
 
     return StreamingResponse(
         event_stream(),
@@ -1106,9 +1191,6 @@ async def generate_image(
             status_code=502,
             detail="OpenAI 图片生成失败，请检查模型、额度和网络",
         ) from error
-    finally:
-        await client.close()
-
     filename = f"ai-{uuid.uuid4().hex}.png"
     filepath = os.path.join(UPLOAD_DIR, filename)
     async with aiofiles.open(filepath, "wb") as output:

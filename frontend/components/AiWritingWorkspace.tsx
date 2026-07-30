@@ -57,7 +57,7 @@ export function AiPlanWorkspace({
           <Sparkles className="size-5" />
         </span>
         <h2 className="text-sm font-semibold">还没有可选方案</h2>
-        <p className="mt-1 text-xs text-muted-foreground">在对话中选择“创作方案”并发送想法</p>
+        <p className="mt-1 text-xs text-muted-foreground">先在 AI 对话中讨论，准备好后再整理标题与创作方案</p>
       </div>
     )
   }
@@ -136,7 +136,7 @@ export function AiPlanWorkspace({
           </div>
         </section>
 
-        <section className="py-5">
+        <section className="border-b py-5">
           <div className="mb-3 flex items-center justify-between gap-3">
             <h3 className="text-sm font-semibold">内容方向</h3>
             <span className="text-xs text-muted-foreground">已选 {activePlan.selected_direction_ids.length}/2</span>
@@ -165,6 +165,10 @@ export function AiPlanWorkspace({
                   <span className="min-w-0 flex-1">
                     <span className="flex flex-wrap items-center gap-1.5">
                       <span className="text-sm font-semibold">{direction.name}</span>
+                      {direction.content_type && <Badge variant="outline">{direction.content_type}</Badge>}
+                      {direction.conversion_strength && (
+                        <Badge variant="outline">带货 {direction.conversion_strength}</Badge>
+                      )}
                       {recommended && <Badge variant="secondary">推荐</Badge>}
                     </span>
                     <span className="mt-1 block text-xs leading-5 text-muted-foreground">{direction.summary}</span>
@@ -182,6 +186,56 @@ export function AiPlanWorkspace({
             <p className="mt-3 text-xs leading-5 text-muted-foreground">推荐理由：{activePlan.recommendation_reason}</p>
           )}
         </section>
+
+        {(activePlan.cover_suggestions ?? []).length > 0 && (
+          <section className="border-b py-5">
+            <div className="mb-3 flex items-center justify-between gap-3">
+              <h3 className="text-sm font-semibold">首图建议</h3>
+              <span className="text-xs text-muted-foreground">{activePlan.cover_suggestions?.length} 种</span>
+            </div>
+            <div className="divide-y rounded-md border">
+              {activePlan.cover_suggestions?.map((cover) => (
+                <div key={cover.id} className="px-3 py-3">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <Badge variant="outline">{cover.type}</Badge>
+                    {cover.headline && <span className="text-sm font-semibold">{cover.headline}</span>}
+                  </div>
+                  <p className="mt-2 text-xs leading-5"><strong>画面：</strong>{cover.visual}</p>
+                  {cover.rationale && (
+                    <p className="mt-1 text-xs leading-5 text-muted-foreground">{cover.rationale}</p>
+                  )}
+                </div>
+              ))}
+            </div>
+          </section>
+        )}
+
+        {activePlan.testing_advice && (
+          <section className="py-5">
+            <h3 className="text-sm font-semibold">发布测试建议</h3>
+            <p className="mt-2 text-sm leading-6">{activePlan.testing_advice.primary_goal}</p>
+            <div className="mt-4 grid gap-4 sm:grid-cols-3">
+              <div>
+                <p className="text-xs font-semibold text-muted-foreground">发布前</p>
+                <ul className="mt-2 list-disc space-y-1 pl-4 text-xs leading-5">
+                  {activePlan.testing_advice.pre_publish_checks.map((item) => <li key={item}>{item}</li>)}
+                </ul>
+              </div>
+              <div>
+                <p className="text-xs font-semibold text-muted-foreground">观察信号</p>
+                <ul className="mt-2 list-disc space-y-1 pl-4 text-xs leading-5">
+                  {activePlan.testing_advice.success_signals.map((item) => <li key={item}>{item}</li>)}
+                </ul>
+              </div>
+              <div>
+                <p className="text-xs font-semibold text-muted-foreground">迭代动作</p>
+                <ul className="mt-2 list-disc space-y-1 pl-4 text-xs leading-5">
+                  {activePlan.testing_advice.iteration_actions.map((item) => <li key={item}>{item}</li>)}
+                </ul>
+              </div>
+            </div>
+          </section>
+        )}
       </div>
 
       <div className="flex items-center justify-end border-t bg-card px-5 py-3">

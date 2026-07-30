@@ -927,10 +927,27 @@ export interface AiTitleCandidate {
 export interface AiContentDirection {
   id: string
   name: string
+  content_type?: string
+  conversion_strength?: string
   summary: string
   tone: string
   opening: string
   outline: string[]
+}
+
+export interface AiCoverSuggestion {
+  id: string
+  type: string
+  headline: string
+  visual: string
+  rationale: string
+}
+
+export interface AiTestingAdvice {
+  primary_goal: string
+  pre_publish_checks: string[]
+  success_signals: string[]
+  iteration_actions: string[]
 }
 
 export interface AiWritingPlan {
@@ -939,6 +956,8 @@ export interface AiWritingPlan {
   factual_questions: string[]
   titles: AiTitleCandidate[]
   directions: AiContentDirection[]
+  cover_suggestions?: AiCoverSuggestion[]
+  testing_advice?: AiTestingAdvice
   recommended_title_id: string
   recommended_direction_ids: string[]
   recommendation_reason: string
@@ -1294,7 +1313,10 @@ export async function streamAiChat(
   }
 }
 
-export async function generateAiWritingPlan(payload: AiChatRequest): Promise<AiWritingPlan> {
+export async function generateAiWritingPlan(
+  payload: AiChatRequest,
+  onProgress?: (message: string) => void,
+): Promise<AiWritingPlan> {
   const res = await apiFetch(`${API_BASE}/api/ai/writing-plan`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -1322,6 +1344,7 @@ export async function generateAiWritingPlan(payload: AiChatRequest): Promise<AiW
         message?: string
         plan?: AiWritingPlan
       }
+      if (data.type === "progress" && data.message) onProgress?.(data.message)
       if (data.type === "plan" && data.plan) completedPlan = data.plan
       if (data.type === "error") throw new Error(data.message || "AI 创作方案整理失败")
     }
