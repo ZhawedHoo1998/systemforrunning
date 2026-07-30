@@ -3,6 +3,8 @@
 import { useMemo, useState } from "react"
 import Image from "next/image"
 import {
+  ArrowLeft,
+  ArrowRight,
   CheckCircle2,
   ImagePlus,
   Images,
@@ -23,8 +25,15 @@ import {
   DialogDescription,
   DialogTitle,
 } from "@/components/ui/dialog"
+import { Input } from "@/components/ui/input"
 import { Textarea } from "@/components/ui/textarea"
-import type { AiImageMessage, Attachment } from "@/lib/api"
+import type {
+  AiCollageSettings,
+  AiCollageTemplate,
+  AiImageMessage,
+  AiImageMode,
+  Attachment,
+} from "@/lib/api"
 import { cn } from "@/lib/utils"
 
 interface SourceImage {
@@ -37,6 +46,76 @@ interface ImageThreadSummary {
   title: string
   generationCount: number
   isGenerating: boolean
+}
+
+const COLLAGE_TEMPLATES: {
+  id: AiCollageTemplate
+  label: string
+  countLabel: string
+  minimumImages: number
+  imageLimit: number
+}[] = [
+  { id: "hero_headline", label: "大图标题", countLabel: "1 图", minimumImages: 1, imageLimit: 1 },
+  { id: "split_compare", label: "左右对比", countLabel: "2 图", minimumImages: 2, imageLimit: 2 },
+  { id: "story_triptych", label: "三段故事", countLabel: "3 图", minimumImages: 3, imageLimit: 3 },
+  { id: "detail_grid", label: "四宫格", countLabel: "4 图", minimumImages: 4, imageLimit: 4 },
+  { id: "review_card", label: "测评卡片", countLabel: "1-3 图", minimumImages: 1, imageLimit: 3 },
+]
+
+const COLLAGE_PALETTES = [
+  { label: "纸白", background: "#F7F7F5", text: "#171717" },
+  { label: "墨黑", background: "#171717", text: "#FFFFFF" },
+  { label: "莓红", background: "#B42318", text: "#FFFFFF" },
+  { label: "松绿", background: "#1E4D3A", text: "#FFFFFF" },
+]
+
+function CollageTemplatePreview({ template }: { template: AiCollageTemplate }) {
+  const block = "bg-current/65"
+  return (
+    <span className="grid aspect-[3/4] h-12 shrink-0 gap-0.5 rounded-sm border border-current/25 p-1">
+      {template === "hero_headline" && (
+        <>
+          <span className="h-2 rounded-[1px] bg-current/25" />
+          <span className={cn("rounded-[1px]", block)} />
+        </>
+      )}
+      {template === "split_compare" && (
+        <>
+          <span className="h-2 rounded-[1px] bg-current/25" />
+          <span className="grid grid-cols-2 gap-0.5">
+            <span className={cn("rounded-[1px]", block)} />
+            <span className={cn("rounded-[1px]", block)} />
+          </span>
+        </>
+      )}
+      {template === "story_triptych" && (
+        <>
+          <span className="h-2 rounded-[1px] bg-current/25" />
+          <span className={cn("rounded-[1px]", block)} />
+          <span className={cn("rounded-[1px]", block)} />
+          <span className={cn("rounded-[1px]", block)} />
+        </>
+      )}
+      {template === "detail_grid" && (
+        <>
+          <span className="h-2 rounded-[1px] bg-current/25" />
+          <span className="grid grid-cols-2 grid-rows-2 gap-0.5">
+            {[0, 1, 2, 3].map((index) => <span key={index} className={cn("rounded-[1px]", block)} />)}
+          </span>
+        </>
+      )}
+      {template === "review_card" && (
+        <>
+          <span className="h-2 rounded-[1px] bg-current/25" />
+          <span className={cn("rounded-[1px]", block)} />
+          <span className="grid grid-cols-[1fr_1.4fr] gap-0.5">
+            <span className={cn("rounded-[1px]", block)} />
+            <span className="rounded-[1px] bg-current/25" />
+          </span>
+        </>
+      )}
+    </span>
+  )
 }
 
 interface AiImageWorkspaceProps {
@@ -53,14 +132,19 @@ interface AiImageWorkspaceProps {
   generatingImage: boolean
   imageGenerationBusy: boolean
   uploadingReferences: boolean
+  imageMode: AiImageMode
   imagePrompt: string
+  collageSettings: AiCollageSettings
   imageReady: boolean
   latestAssistant: string
   onSelectThread: (threadId: string) => void
   onCreateThread: () => void
   onToggleReferenceAttachment: (attachment: Attachment) => void
   onUploadReferenceImages: (files: File[]) => void
+  onImageModeChange: (mode: AiImageMode) => void
   onImagePromptChange: (value: string) => void
+  onCollageSettingsChange: (patch: Partial<AiCollageSettings>) => void
+  onMoveReferenceAttachment: (path: string, direction: -1 | 1) => void
   onGenerateImage: () => void
 }
 
@@ -78,14 +162,19 @@ export function AiImageWorkspace({
   generatingImage,
   imageGenerationBusy,
   uploadingReferences,
+  imageMode,
   imagePrompt,
+  collageSettings,
   imageReady,
   latestAssistant,
   onSelectThread,
   onCreateThread,
   onToggleReferenceAttachment,
   onUploadReferenceImages,
+  onImageModeChange,
   onImagePromptChange,
+  onCollageSettingsChange,
+  onMoveReferenceAttachment,
   onGenerateImage,
 }: AiImageWorkspaceProps) {
   const [expanded, setExpanded] = useState(false)
@@ -93,6 +182,13 @@ export function AiImageWorkspace({
   const selectedPaths = useMemo(
     () => new Set(selectedReferences.map((attachment) => attachment.path)),
     [selectedReferences]
+  )
+  const selectedTemplate = COLLAGE_TEMPLATES.find(
+    (template) => template.id === collageSettings.template
+  ) ?? COLLAGE_TEMPLATES[0]
+  const collageReady = Boolean(
+    collageSettings.title.trim()
+    && selectedReferences.length >= selectedTemplate.minimumImages
   )
 
   const openAttachment = (attachment: Attachment, alt: string) => {
@@ -231,13 +327,18 @@ export function AiImageWorkspace({
         </div>
         {selectedReferences.length > 0 ? (
           <div className={cn("grid grid-cols-4 gap-2", isExpanded && "grid-cols-3")}>
-            {selectedReferences.map((attachment) => (
+            {selectedReferences.map((attachment, index) => (
               <div
                 key={attachment.path}
                 className="group relative aspect-square overflow-hidden rounded-md border bg-muted"
                 onDoubleClick={() => openAttachment(attachment, attachment.name)}
               >
                 <Image src={attachment.path} alt={attachment.name} fill sizes="160px" className="object-cover" unoptimized />
+                {imageMode === "collage" && (
+                  <span className="absolute left-1 top-1 grid size-6 place-items-center rounded bg-black/70 text-[11px] font-semibold text-white">
+                    {index + 1}
+                  </span>
+                )}
                 <button
                   type="button"
                   className="absolute bottom-1 left-1 grid size-6 place-items-center rounded bg-black/65 text-white opacity-0 transition-opacity group-hover:opacity-100 focus-visible:opacity-100"
@@ -256,6 +357,30 @@ export function AiImageWorkspace({
                 >
                   <X className="size-3.5" />
                 </button>
+                {imageMode === "collage" && (
+                  <span className="absolute bottom-1 right-1 flex overflow-hidden rounded bg-background/90 shadow-sm">
+                    <button
+                      type="button"
+                      className="grid size-6 place-items-center text-foreground disabled:opacity-35"
+                      onClick={() => onMoveReferenceAttachment(attachment.path, -1)}
+                      disabled={index === 0}
+                      aria-label={`将第 ${index + 1} 张参考图前移`}
+                      title="前移"
+                    >
+                      <ArrowLeft className="size-3.5" />
+                    </button>
+                    <button
+                      type="button"
+                      className="grid size-6 place-items-center border-l text-foreground disabled:opacity-35"
+                      onClick={() => onMoveReferenceAttachment(attachment.path, 1)}
+                      disabled={index === selectedReferences.length - 1}
+                      aria-label={`将第 ${index + 1} 张参考图后移`}
+                      title="后移"
+                    >
+                      <ArrowRight className="size-3.5" />
+                    </button>
+                  </span>
+                )}
               </div>
             ))}
           </div>
@@ -271,7 +396,7 @@ export function AiImageWorkspace({
       className={cn(
         "space-y-4",
         isExpanded
-          ? "h-full min-h-[280px] overflow-y-auto bg-muted/20 p-4 sm:p-5"
+          ? "min-h-[280px] bg-muted/20 p-4 sm:p-5 lg:h-full lg:overflow-y-auto"
           : "max-h-[560px] overflow-y-auto border-y py-3 pr-1"
       )}
       aria-label="图片生成对话记录"
@@ -359,17 +484,153 @@ export function AiImageWorkspace({
     </div>
   )
 
+  const renderCollageControls = (isExpanded: boolean) => (
+    <div className="space-y-3 border-y py-3">
+      <div className="flex items-center justify-between gap-3 text-xs">
+        <span className="font-medium">拼图版式</span>
+        <span className="text-muted-foreground">1080 × 1440</span>
+      </div>
+      <div className={cn("grid grid-cols-2 gap-2", isExpanded && "sm:grid-cols-5")}>
+        {COLLAGE_TEMPLATES.map((template) => {
+          const selected = template.id === collageSettings.template
+          return (
+            <button
+              key={template.id}
+              type="button"
+              onClick={() => onCollageSettingsChange({ template: template.id })}
+              className={cn(
+                "flex min-h-16 items-center gap-2 rounded-md border px-2 py-2 text-left text-xs transition-colors",
+                selected
+                  ? "border-primary bg-accent text-accent-foreground ring-1 ring-primary/25"
+                  : "bg-background text-muted-foreground hover:border-primary/60 hover:text-foreground"
+              )}
+              aria-pressed={selected}
+            >
+              <CollageTemplatePreview template={template.id} />
+              <span className="min-w-0">
+                <span className="block font-medium text-foreground">{template.label}</span>
+                <span className="mt-0.5 block text-[10px]">{template.countLabel}</span>
+              </span>
+            </button>
+          )
+        })}
+      </div>
+
+      <div className={cn("grid gap-2", isExpanded && "sm:grid-cols-2")}>
+        <label className="space-y-1 text-xs font-medium">
+          <span>封面标题</span>
+          <Input
+            value={collageSettings.title}
+            onChange={(event) => onCollageSettingsChange({ title: event.target.value })}
+            placeholder="输入主标题"
+            maxLength={60}
+          />
+        </label>
+        <label className="space-y-1 text-xs font-medium">
+          <span>副标题</span>
+          <Input
+            value={collageSettings.subtitle}
+            onChange={(event) => onCollageSettingsChange({ subtitle: event.target.value })}
+            placeholder="可选"
+            maxLength={120}
+          />
+        </label>
+      </div>
+
+      <div className="flex flex-wrap items-center gap-2">
+        <span className="mr-1 text-xs font-medium">配色</span>
+        {COLLAGE_PALETTES.map((palette) => {
+          const selected = palette.background === collageSettings.background_color
+            && palette.text === collageSettings.text_color
+          return (
+            <button
+              key={palette.label}
+              type="button"
+              className={cn(
+                "relative size-7 overflow-hidden rounded border shadow-sm",
+                selected && "ring-2 ring-primary ring-offset-2"
+              )}
+              onClick={() => onCollageSettingsChange({
+                background_color: palette.background,
+                text_color: palette.text,
+              })}
+              aria-label={`使用${palette.label}配色`}
+              title={palette.label}
+              style={{ backgroundColor: palette.background }}
+            >
+              <span
+                className="absolute bottom-0 right-0 size-3.5 border-l border-t"
+                style={{ backgroundColor: palette.text }}
+              />
+            </button>
+          )
+        })}
+        <label className="ml-auto flex items-center gap-1.5 text-[11px] text-muted-foreground">
+          底色
+          <input
+            type="color"
+            value={collageSettings.background_color}
+            onChange={(event) => onCollageSettingsChange({ background_color: event.target.value.toUpperCase() })}
+            className="size-7 cursor-pointer rounded border bg-background p-0.5"
+            aria-label="自定义拼图底色"
+          />
+        </label>
+        <label className="flex items-center gap-1.5 text-[11px] text-muted-foreground">
+          文字
+          <input
+            type="color"
+            value={collageSettings.text_color}
+            onChange={(event) => onCollageSettingsChange({ text_color: event.target.value.toUpperCase() })}
+            className="size-7 cursor-pointer rounded border bg-background p-0.5"
+            aria-label="自定义拼图文字颜色"
+          />
+        </label>
+      </div>
+    </div>
+  )
+
   const renderComposer = (isExpanded: boolean) => (
     <div className={cn("space-y-3", isExpanded && "border-t bg-card p-4 sm:p-5")}>
-      <Textarea
-        value={imagePrompt}
-        onChange={(event) => onImagePromptChange(event.target.value)}
-        placeholder={generatedImages.length > 0 ? "继续说明下一版要修改的地方" : "描述要保留的内容和希望调整的方向"}
-        rows={isExpanded ? 4 : 3}
-        className={cn(isExpanded && "min-h-28 resize-y")}
-      />
+      <div className="grid grid-cols-2 rounded-md bg-muted p-1" role="tablist" aria-label="图片生成方式">
+        <button
+          type="button"
+          role="tab"
+          aria-selected={imageMode === "ai"}
+          onClick={() => onImageModeChange("ai")}
+          className={cn(
+            "flex h-8 items-center justify-center gap-1.5 rounded text-xs font-medium transition-colors",
+            imageMode === "ai" ? "bg-background text-foreground shadow-sm" : "text-muted-foreground"
+          )}
+        >
+          <ImagePlus className="size-3.5" />
+          单图生成
+        </button>
+        <button
+          type="button"
+          role="tab"
+          aria-selected={imageMode === "collage"}
+          onClick={() => onImageModeChange("collage")}
+          className={cn(
+            "flex h-8 items-center justify-center gap-1.5 rounded text-xs font-medium transition-colors",
+            imageMode === "collage" ? "bg-background text-foreground shadow-sm" : "text-muted-foreground"
+          )}
+        >
+          <Images className="size-3.5" />
+          拼图排版
+        </button>
+      </div>
+
+      {imageMode === "collage" ? renderCollageControls(isExpanded) : (
+        <Textarea
+          value={imagePrompt}
+          onChange={(event) => onImagePromptChange(event.target.value)}
+          placeholder={generatedImages.length > 0 ? "继续说明下一版要修改的地方" : "描述要保留的内容和希望调整的方向"}
+          rows={isExpanded ? 4 : 3}
+          className={cn(isExpanded && "min-h-28 resize-y")}
+        />
+      )}
       <div className={cn("space-y-2", isExpanded && "sm:flex sm:items-center sm:justify-between sm:gap-3 sm:space-y-0")}>
-        {latestAssistant ? (
+        {imageMode === "ai" && latestAssistant ? (
           <Button
             type="button"
             variant="ghost"
@@ -386,21 +647,39 @@ export function AiImageWorkspace({
             type="button"
             className={cn("w-full", isExpanded && "sm:w-auto sm:min-w-40")}
             onClick={onGenerateImage}
-            disabled={!imageReady || selectedReferences.length === 0 || !imagePrompt.trim() || imageGenerationBusy || uploadingReferences}
+            disabled={
+              selectedReferences.length === 0
+              || imageGenerationBusy
+              || uploadingReferences
+              || (imageMode === "ai" ? !imageReady || !imagePrompt.trim() : !collageReady)
+            }
           >
-            {imageGenerationBusy ? <LoaderCircle className="animate-spin" /> : <ImagePlus />}
+            {imageGenerationBusy
+              ? <LoaderCircle className="animate-spin" />
+              : imageMode === "collage" ? <Images /> : <ImagePlus />}
             {generatingImage
-              ? "生成中"
+              ? imageMode === "collage" ? "拼图中" : "生成中"
               : imageGenerationBusy
                 ? "其他对话生成中"
-                : generatedImages.length > 0
-                  ? "生成下一版"
-                  : "生成第一版"}
+                : imageMode === "collage"
+                  ? generatedImages.length > 0 ? "生成下一版拼图" : "生成拼图"
+                  : generatedImages.length > 0 ? "生成下一版" : "生成第一版"}
           </Button>
-          <p className="text-[11px] text-muted-foreground">使用 {selectedReferences.length} 张参考图</p>
+          <p className="text-[11px] text-muted-foreground">
+            {imageMode === "collage"
+              ? `按顺序使用前 ${Math.min(selectedReferences.length, selectedTemplate.imageLimit)} 张参考图`
+              : `使用 ${selectedReferences.length} 张参考图`}
+          </p>
         </div>
       </div>
-      {!imageReady && <p className="text-xs leading-5 text-muted-foreground">后台配置图片模型后可用</p>}
+      {imageMode === "collage" && selectedReferences.length < selectedTemplate.minimumImages && (
+        <p className="text-xs leading-5 text-destructive">
+          当前版式还需选择 {selectedTemplate.minimumImages - selectedReferences.length} 张参考图
+        </p>
+      )}
+      {imageMode === "ai" && !imageReady && (
+        <p className="text-xs leading-5 text-muted-foreground">后台配置图片模型后可用</p>
+      )}
     </div>
   )
 
@@ -451,12 +730,12 @@ export function AiImageWorkspace({
             </div>
           </div>
           <div className="shrink-0 border-b">{renderThreadBar()}</div>
-          <div className="grid min-h-0 flex-1 grid-rows-[minmax(220px,0.8fr)_minmax(360px,1.2fr)] lg:grid-cols-[340px_minmax(0,1fr)] lg:grid-rows-none">
-            <aside className="min-h-0 overflow-y-auto border-b p-4 lg:border-b-0 lg:border-r" aria-label="图片参考素材">
+          <div className="grid min-h-0 flex-1 overflow-y-auto lg:grid-cols-[340px_minmax(0,1fr)] lg:grid-rows-none lg:overflow-hidden">
+            <aside className="border-b p-4 lg:min-h-0 lg:overflow-y-auto lg:border-b-0 lg:border-r" aria-label="图片参考素材">
               {renderSources(true)}
             </aside>
-            <div className="flex min-h-0 flex-col">
-              <div className="min-h-0 flex-1">
+            <div className="flex flex-col lg:min-h-0">
+              <div className="lg:min-h-0 lg:flex-1">
                 {renderHistory(true)}
               </div>
               {renderComposer(true)}

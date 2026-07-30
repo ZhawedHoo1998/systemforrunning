@@ -32,6 +32,7 @@ interface CreatorPostGalleryProps {
   accountName: string
   notes: CreatorAccountSampleNote[]
   selectedNotes: CreatorAccountSampleNote[]
+  archivingNoteIds: string[]
   loading: boolean
   search: string
   maxSelected: number
@@ -61,6 +62,7 @@ export function CreatorPostGallery({
   accountName,
   notes,
   selectedNotes,
+  archivingNoteIds,
   loading,
   search,
   maxSelected,
@@ -193,6 +195,7 @@ export function CreatorPostGallery({
           <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 sm:gap-4 lg:grid-cols-4 xl:grid-cols-5">
             {visibleNotes.map((note) => {
               const selected = selectedIds.has(note.id)
+              const archiving = archivingNoteIds.includes(note.id)
               const cover = postCover(note)
               const imageCount = postImageCount(note)
               const title = note.title || "无标题笔记"
@@ -233,17 +236,25 @@ export function CreatorPostGallery({
                     )}
                     <Checkbox
                       checked={selected}
+                      disabled={archiving}
                       onCheckedChange={() => onToggle(note)}
                       className="absolute right-2 top-2 z-10 size-6 border-background/80 bg-background/90 shadow-sm"
                       aria-label={`${selected ? "取消选择" : "选择"} ${title}`}
                     />
                     <div className="pointer-events-none absolute bottom-2 right-2 flex items-center gap-1 rounded bg-black/65 px-1.5 py-1 text-[10px] text-white">
-                      {note.has_video ? <Clapperboard className="size-3" /> : <Images className="size-3" />}
-                      {imageCount > 0 ? `${imageCount} 张` : note.has_video ? "视频" : "无图片"}
+                      {archiving ? (
+                        <LoaderCircle className="size-3 animate-spin" />
+                      ) : note.has_video ? (
+                        <Clapperboard className="size-3" />
+                      ) : (
+                        <Images className="size-3" />
+                      )}
+                      {archiving ? "保存中" : imageCount > 0 ? `${imageCount} 张` : note.has_video ? "视频" : "无图片"}
                     </div>
                   </div>
                   <button
                     type="button"
+                    disabled={archiving}
                     className="block min-h-[76px] w-full px-3 py-2.5 text-left"
                     onClick={() => onToggle(note)}
                     aria-pressed={selected}

@@ -50,8 +50,10 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog"
 import {
+  archiveCreatorAccountNoteMedia,
   createCreation,
   exportCreationPackage,
+  generateAiCollage,
   generateAiImage,
   generateAiWritingPlan,
   getAiStatus,
@@ -69,7 +71,9 @@ import {
   type CreatorAccount,
   type CreatorAccountSampleNote,
   type AiMessage,
+  type AiCollageSettings,
   type AiImageMessage,
+  type AiImageMode,
   type AiImageThread,
   type AiDraft,
   type AiDraftVersion,
@@ -101,6 +105,16 @@ const MAX_IMAGE_REFERENCES = 8
 const MAX_CREATOR_NOTE_REFERENCES = 20
 type WritingWorkspaceMode = "chat" | "plan" | "draft"
 
+function createDefaultCollageSettings(): AiCollageSettings {
+  return {
+    template: "hero_headline",
+    title: "",
+    subtitle: "",
+    background_color: "#F7F7F5",
+    text_color: "#171717",
+  }
+}
+
 function createEmptyDraft(): AiDraft {
   return {
     title: "",
@@ -130,7 +144,9 @@ function createImageThread(index: number, id = `image-thread-${Date.now()}-${ind
   return {
     id,
     title: `图片对话 ${index}`,
+    mode: "ai",
     image_prompt: "",
+    collage: createDefaultCollageSettings(),
     selected_references: [],
     generated_images: [],
     messages: [],
@@ -226,6 +242,7 @@ export default function AiStudioPage() {
   const [creatorNotesLoading, setCreatorNotesLoading] = useState(false)
   const [creatorNoteSearch, setCreatorNoteSearch] = useState("")
   const [selectedCreatorNotes, setSelectedCreatorNotes] = useState<CreatorAccountSampleNote[]>([])
+  const [archivingCreatorNoteIds, setArchivingCreatorNoteIds] = useState<string[]>([])
   const [vehicles, setVehicles] = useState<VehicleOption[]>([])
   const [scopeFilter, setScopeFilter] = useState<"all" | MaterialScope>("all")
   const [materialSearch, setMaterialSearch] = useState("")
@@ -312,7 +329,12 @@ export default function AiStudioPage() {
               ...thread,
               id: thread.id || `restored-image-thread-${index + 1}`,
               title: thread.title || `图片对话 ${index + 1}`,
+              mode: thread.mode || "ai",
               image_prompt: thread.image_prompt || "",
+              collage: {
+                ...createDefaultCollageSettings(),
+                ...(thread.collage || {}),
+              },
               selected_references: thread.selected_references || [],
               generated_images: thread.generated_images || [],
               messages: thread.messages || [],
@@ -669,22 +691,19 @@ export default function AiStudioPage() {
     ))
   }
 
-  const toggleCreatorNote = (note: CreatorAccountSampleNote) => {
+  const toggleCreatorNote = async (note: CreatorAccountSampleNote) => {
+    if (archivingCreatorNoteIds.includes(note.id)) return
     const selected = selectedCreatorNoteIds.includes(note.id)
     if (!selected && selectedCreatorNotes.length >= MAX_CREATOR_NOTE_REFERENCES) {
       setChatError(`每轮最多选择 ${MAX_CREATOR_NOTE_REFERENCES} 篇账号旧帖`)
       return
     }
     setChatError("")
-    setSelectedCreatorNotes((current) => selected
-      ? current.filter((item) => item.id !== note.id)
-      : [...current, note]
-    )
-    if (activeImageThread) {
+    if (selected) {
+      setSelectedCreatorNotes((current) => current.filter((item) => item.id !== note.id))
       const noteImages = (note.attachments ?? []).filter(isImageAttachment)
       const noteImagePaths = new Set(noteImages.map((attachment) => attachment.path))
-      const firstImage = noteImages[0]
-      if (selected && noteImagePaths.size > 0) {
+      if (activeImageThread && noteImagePaths.size > 0) {
         updateImageThread(activeImageThread.id, (thread) => ({
           ...thread,
           selected_references: thread.selected_references.filter(
@@ -692,22 +711,55 @@ export default function AiStudioPage() {
           ),
           updated_at: new Date().toISOString(),
         }))
-      } else if (
-        firstImage
-        && !activeImageThread.selected_references.some((reference) => reference.path === firstImage.path)
-      ) {
-        if (activeImageThread.selected_references.length < MAX_IMAGE_REFERENCES) {
-          updateImageThread(activeImageThread.id, (thread) => ({
-            ...thread,
-            selected_references: [...thread.selected_references, firstImage],
-            updated_at: new Date().toISOString(),
-          }))
-        } else {
-          setChatError(`旧帖已选中；当前图片对话最多使用 ${MAX_IMAGE_REFERENCES} 张参考图`)
-        }
+      }
+      setSavedCreation(null)
+      return
+    }
+
+    setSelectedCreatorNotes((current) => [...current, note])
+    setSavedCreation(null)
+
+    let resolvedNote = note
+    let noteImages = (resolvedNote.attachments ?? []).filter(isImageAttachment)
+    if (noteImages.length === 0 && selectedCreatorAccountId) {
+      setArchivingCreatorNoteIds((current) => [...current, note.id])
+      try {
+        resolvedNote = await archiveCreatorAccountNoteMedia(selectedCreatorAccountId, note.id)
+        noteImages = (resolvedNote.attachments ?? []).filter(isImageAttachment)
+        setCreatorNotes((current) => current.map((item) => (
+          item.id === note.id ? resolvedNote : item
+        )))
+        setSelectedCreatorNotes((current) => current.map((item) => (
+          item.id === note.id ? resolvedNote : item
+        )))
+      } catch (error) {
+        setChatError(error instanceof Error ? error.message : "旧帖图片保存失败")
+      } finally {
+        setArchivingCreatorNoteIds((current) => current.filter((id) => id !== note.id))
       }
     }
-    setSavedCreation(null)
+
+    const firstImage = noteImages[0]
+    if (activeImageThread && firstImage) {
+      if (activeImageThread.selected_references.some((reference) => reference.path === firstImage.path)) {
+        return
+      }
+      if (activeImageThread.selected_references.length >= MAX_IMAGE_REFERENCES) {
+        setChatError(`旧帖已选中；当前图片对话最多使用 ${MAX_IMAGE_REFERENCES} 张参考图`)
+        return
+      }
+      updateImageThread(activeImageThread.id, (thread) => ({
+        ...thread,
+        selected_references: thread.selected_references.some(
+          (reference) => reference.path === firstImage.path
+        )
+          ? thread.selected_references
+          : [...thread.selected_references, firstImage].slice(0, MAX_IMAGE_REFERENCES),
+        updated_at: new Date().toISOString(),
+      }))
+    } else if (noteImages.length === 0) {
+      setChatError("旧帖已选中，但该帖子没有可用图片")
+    }
   }
 
   const handleImagePromptChange = (value: string) => {
@@ -717,6 +769,55 @@ export default function AiStudioPage() {
       image_prompt: value,
       updated_at: new Date().toISOString(),
     }))
+  }
+
+  const handleImageModeChange = (mode: AiImageMode) => {
+    if (!activeImageThread) return
+    updateImageThread(activeImageThread.id, (thread) => ({
+      ...thread,
+      mode,
+      updated_at: new Date().toISOString(),
+    }))
+    setChatError("")
+    setSavedCreation(null)
+  }
+
+  const handleCollageSettingsChange = (patch: Partial<AiCollageSettings>) => {
+    if (!activeImageThread) return
+    updateImageThread(activeImageThread.id, (thread) => ({
+      ...thread,
+      collage: {
+        ...thread.collage,
+        ...patch,
+      },
+      updated_at: new Date().toISOString(),
+    }))
+    setChatError("")
+    setSavedCreation(null)
+  }
+
+  const handleMoveReferenceAttachment = (path: string, direction: -1 | 1) => {
+    if (!activeImageThread) return
+    updateImageThread(activeImageThread.id, (thread) => {
+      const index = thread.selected_references.findIndex(
+        (reference) => reference.path === path
+      )
+      const nextIndex = index + direction
+      if (index < 0 || nextIndex < 0 || nextIndex >= thread.selected_references.length) {
+        return thread
+      }
+      const selectedReferences = [...thread.selected_references]
+      ;[selectedReferences[index], selectedReferences[nextIndex]] = [
+        selectedReferences[nextIndex],
+        selectedReferences[index],
+      ]
+      return {
+        ...thread,
+        selected_references: selectedReferences,
+        updated_at: new Date().toISOString(),
+      }
+    })
+    setSavedCreation(null)
   }
 
   const toggleReferenceAttachment = (attachment: Attachment) => {
@@ -1028,9 +1129,20 @@ export default function AiStudioPage() {
 
   const handleGenerateImage = async () => {
     if (!activeImageThread || generatingImageThreadId) return
-    const prompt = activeImageThread.image_prompt.trim()
+    const imageMode = activeImageThread.mode ?? "ai"
+    const collageSettings = activeImageThread.collage ?? createDefaultCollageSettings()
+    const prompt = imageMode === "collage"
+      ? [
+          `拼图排版 · ${collageSettings.title.trim()}`,
+          collageSettings.subtitle.trim(),
+        ].filter(Boolean).join("\n")
+      : activeImageThread.image_prompt.trim()
     const references = activeImageThread.selected_references
-    if (!prompt || references.length === 0 || !imageReady) return
+    if (
+      !prompt
+      || references.length === 0
+      || (imageMode === "ai" && !imageReady)
+    ) return
     const targetThreadId = activeImageThread.id
     const userMessage: AiImageMessage = {
       id: crypto.randomUUID(),
@@ -1038,6 +1150,7 @@ export default function AiStudioPage() {
       content: prompt,
       references,
       reference: references[0],
+      collage: imageMode === "collage" ? collageSettings : undefined,
     }
     updateImageThread(targetThreadId, (thread) => ({
       ...thread,
@@ -1049,26 +1162,32 @@ export default function AiStudioPage() {
     setSavedCreation(null)
     try {
       const referenceFiles = await Promise.all(references.map((attachment) => attachmentToFile(attachment)))
-      const result = await generateAiImage({
-        prompt,
-        reference_images: referenceFiles,
-        reference_attachments: references,
-        history: activeImageThread.messages
-          .filter((message) => message.role === "user")
-          .map((message) => message.content),
-        brand: selectedBrand,
-        car_model: selectedCarModel,
-        material_ids: selectedMaterialIds,
-        creator_account_id: selectedCreatorAccountId,
-        creator_note_ids: selectedCreatorNoteIds,
-      })
+      const result = imageMode === "collage"
+        ? await generateAiCollage({
+            reference_images: referenceFiles,
+            reference_attachments: references,
+            settings: collageSettings,
+          })
+        : await generateAiImage({
+            prompt,
+            reference_images: referenceFiles,
+            reference_attachments: references,
+            history: activeImageThread.messages
+              .filter((message) => message.role === "user")
+              .map((message) => message.content),
+            brand: selectedBrand,
+            car_model: selectedCarModel,
+            material_ids: selectedMaterialIds,
+            creator_account_id: selectedCreatorAccountId,
+            creator_note_ids: selectedCreatorNoteIds,
+          })
       const attachment = result.attachment
       const persistedReferences = result.reference_attachments?.length
         ? result.reference_attachments
         : references
       updateImageThread(targetThreadId, (thread) => ({
         ...thread,
-        image_prompt: "",
+        image_prompt: imageMode === "ai" ? "" : thread.image_prompt,
         generated_images: [...thread.generated_images, attachment],
         messages: [
           ...thread.messages.map((message) => message.id === userMessage.id
@@ -1077,7 +1196,9 @@ export default function AiStudioPage() {
           {
             id: crypto.randomUUID(),
             role: "assistant" as const,
-            content: `已生成第 ${thread.generated_images.length + 1} 版`,
+            content: imageMode === "collage"
+              ? `已生成第 ${thread.generated_images.length + 1} 版拼图`
+              : `已生成第 ${thread.generated_images.length + 1} 版`,
             image: attachment,
           },
         ],
@@ -1130,7 +1251,7 @@ export default function AiStudioPage() {
     const title = draft.title.trim() || noteTitle.trim() || deriveTitle(savedContent, selectedCarModel)
     const activeReference = activeImageThread?.selected_references[0] ?? null
     const conversation = {
-      version: 5 as const,
+      version: 6 as const,
       task,
       creator_account_id: selectedCreatorAccountId || null,
       selected_creator_note_ids: selectedCreatorNoteIds,
@@ -1506,6 +1627,7 @@ export default function AiStudioPage() {
           accountName={selectedCreatorAccount.name}
           notes={creatorNotes}
           selectedNotes={selectedCreatorNotes}
+          archivingNoteIds={archivingCreatorNoteIds}
           loading={creatorNotesLoading}
           search={creatorNoteSearch}
           maxSelected={MAX_CREATOR_NOTE_REFERENCES}
@@ -1513,7 +1635,7 @@ export default function AiStudioPage() {
             setCreatorNotesLoading(true)
             setCreatorNoteSearch(value)
           }}
-          onToggle={toggleCreatorNote}
+          onToggle={(note) => void toggleCreatorNote(note)}
           onBack={() => setCreatorPostGalleryOpen(false)}
         />
       </div>
@@ -1532,7 +1654,11 @@ export default function AiStudioPage() {
               写手创作工作台
             </div>
             <h1 className="text-2xl font-semibold">AI 创作</h1>
-            <p className="mt-1 text-sm text-muted-foreground">{status?.text_model ? `当前文本模型：${status.text_model}` : "等待后台模型配置"}</p>
+            <p className="mt-1 text-sm text-muted-foreground">
+              {status?.chat_model
+                ? `对话模型：${status.chat_model} · 方案模型：${status.plan_model ?? status.text_model}`
+                : "等待后台模型配置"}
+            </p>
           </div>
           <Button
             variant="outline"
@@ -1687,9 +1813,13 @@ export default function AiStudioPage() {
                               )}
                             </div>
                             <span className="line-clamp-2 min-w-0 flex-1 leading-4">{note.title || "无标题笔记"}</span>
+                            {archivingCreatorNoteIds.includes(note.id) && (
+                              <LoaderCircle className="size-3.5 shrink-0 animate-spin text-primary" aria-label="正在保存旧帖图片" />
+                            )}
                             <button
                               type="button"
-                              onClick={() => toggleCreatorNote(note)}
+                              onClick={() => void toggleCreatorNote(note)}
+                              disabled={archivingCreatorNoteIds.includes(note.id)}
                               className="grid size-6 shrink-0 place-items-center rounded-sm text-muted-foreground hover:bg-background hover:text-foreground"
                               aria-label={`移除旧帖 ${note.title || "无标题笔记"}`}
                               title="移除"
@@ -1941,14 +2071,19 @@ export default function AiStudioPage() {
               generatingImage={generatingImageThreadId === activeImageThreadId}
               imageGenerationBusy={Boolean(generatingImageThreadId)}
               uploadingReferences={uploadingReferences}
+              imageMode={activeImageThread?.mode ?? "ai"}
               imagePrompt={imagePrompt}
+              collageSettings={activeImageThread?.collage ?? createDefaultCollageSettings()}
               imageReady={imageReady}
               latestAssistant={latestAssistant}
               onSelectThread={setActiveImageThreadId}
               onCreateThread={handleCreateImageThread}
               onToggleReferenceAttachment={toggleReferenceAttachment}
               onUploadReferenceImages={handleUploadReferenceImages}
+              onImageModeChange={handleImageModeChange}
               onImagePromptChange={handleImagePromptChange}
+              onCollageSettingsChange={handleCollageSettingsChange}
+              onMoveReferenceAttachment={handleMoveReferenceAttachment}
               onGenerateImage={handleGenerateImage}
             />
 

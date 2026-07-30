@@ -3,11 +3,19 @@
 import { useEffect, useState } from "react"
 import Link from "next/link"
 import { usePathname } from "next/navigation"
-import { BarChart3, CarFront, ClipboardCheck, Clock3, FileText, Heart, Lightbulb, Plus, Search, Sparkles, UserRound } from "lucide-react"
+import { BarChart3, CarFront, CheckCircle2, ClipboardCheck, Clock3, FileText, Heart, Lightbulb, LoaderCircle, MessageSquarePlus, Plus, Search, Sparkles, UserRound } from "lucide-react"
 import { useAuth } from "@/components/AuthProvider"
 import { Button } from "@/components/ui/button"
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogTitle,
+} from "@/components/ui/dialog"
 import { Input } from "@/components/ui/input"
-import { getTaskSummary } from "@/lib/api"
+import { Textarea } from "@/components/ui/textarea"
+import { getTaskSummary, submitPlatformSuggestion } from "@/lib/api"
 import { cn } from "@/lib/utils"
 
 interface HeaderProps {
@@ -37,6 +45,11 @@ export function Header({
   const pathname = usePathname()
   const { user } = useAuth()
   const [taskReminderCount, setTaskReminderCount] = useState(0)
+  const [suggestionOpen, setSuggestionOpen] = useState(false)
+  const [suggestion, setSuggestion] = useState("")
+  const [suggestionSending, setSuggestionSending] = useState(false)
+  const [suggestionSent, setSuggestionSent] = useState(false)
+  const [suggestionError, setSuggestionError] = useState("")
 
   useEffect(() => {
     if (!user) return
@@ -64,6 +77,26 @@ export function Header({
       window.removeEventListener("ruby-rain:tasks-updated", handleTasksUpdated)
     }
   }, [user])
+
+  const handleSuggestionSubmit = async () => {
+    const content = suggestion.trim()
+    if (content.length < 5) {
+      setSuggestionError("请至少输入 5 个字")
+      return
+    }
+    setSuggestionSending(true)
+    setSuggestionError("")
+    try {
+      await submitPlatformSuggestion({ content, source_path: pathname })
+      setSuggestionSent(true)
+      setSuggestion("")
+      window.dispatchEvent(new Event("ruby-rain:tasks-updated"))
+    } catch (error) {
+      setSuggestionError(error instanceof Error ? error.message : "建议提交失败")
+    } finally {
+      setSuggestionSending(false)
+    }
+  }
 
   return (
     <header className="sticky top-0 z-40 border-b bg-card/95 backdrop-blur">
@@ -137,6 +170,23 @@ export function Header({
         )}
 
         <Button
+          type="button"
+          variant="ghost"
+          size="sm"
+          className="h-10 shrink-0 px-2 text-muted-foreground sm:px-3"
+          onClick={() => {
+            setSuggestionSent(false)
+            setSuggestionError("")
+            setSuggestionOpen(true)
+          }}
+          aria-label="提交改进建议"
+          title="提交改进建议"
+        >
+          <MessageSquarePlus />
+          <span className="hidden xl:inline">建议</span>
+        </Button>
+
+        <Button
           asChild
           variant="ghost"
           size="sm"
@@ -178,6 +228,55 @@ export function Header({
           )
         })}
       </nav>
+
+      <Dialog open={suggestionOpen} onOpenChange={setSuggestionOpen}>
+        <DialogContent className="max-w-md">
+          {suggestionSent ? (
+            <div className="py-4 text-center">
+              <CheckCircle2 className="mx-auto size-9 text-emerald-600" />
+              <DialogTitle className="mt-3">建议已提交</DialogTitle>
+              <DialogDescription className="mt-2">管理员会在任务中心收到并跟进这条建议</DialogDescription>
+              <Button type="button" className="mt-5" onClick={() => setSuggestionOpen(false)}>
+                完成
+              </Button>
+            </div>
+          ) : (
+            <>
+              <div>
+                <DialogTitle>改进建议</DialogTitle>
+                <DialogDescription className="mt-1.5">告诉管理员哪里不好用，或你希望增加什么</DialogDescription>
+              </div>
+              <div className="space-y-2">
+                <Textarea
+                  value={suggestion}
+                  onChange={(event) => {
+                    setSuggestion(event.target.value)
+                    if (suggestionError) setSuggestionError("")
+                  }}
+                  maxLength={5000}
+                  rows={7}
+                  placeholder="请输入你的建议"
+                  aria-label="平台改进建议"
+                  autoFocus
+                />
+                <div className="flex items-start justify-between gap-3 text-xs">
+                  <span className="text-destructive">{suggestionError}</span>
+                  <span className="shrink-0 text-muted-foreground">{suggestion.length}/5000</span>
+                </div>
+              </div>
+              <DialogFooter>
+                <Button type="button" variant="outline" onClick={() => setSuggestionOpen(false)} disabled={suggestionSending}>
+                  取消
+                </Button>
+                <Button type="button" onClick={() => void handleSuggestionSubmit()} disabled={suggestionSending || suggestion.trim().length < 5}>
+                  {suggestionSending ? <LoaderCircle className="animate-spin" /> : <MessageSquarePlus />}
+                  {suggestionSending ? "正在提交" : "提交给管理员"}
+                </Button>
+              </DialogFooter>
+            </>
+          )}
+        </DialogContent>
+      </Dialog>
     </header>
   )
 }

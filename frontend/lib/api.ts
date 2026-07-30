@@ -301,6 +301,19 @@ export async function createWorkTask(payload: WorkTaskPayload): Promise<WorkTask
   return res.json()
 }
 
+export async function submitPlatformSuggestion(payload: {
+  content: string
+  source_path?: string
+}): Promise<WorkTask> {
+  const res = await apiFetch(`${API_BASE}/api/tasks/platform-suggestions`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  })
+  if (!res.ok) await throwApiError(res, "建议提交失败")
+  return res.json()
+}
+
 export async function updateWorkTask(id: string, payload: Partial<WorkTaskPayload> & { status?: WorkTask["status"] }): Promise<WorkTask> {
   const res = await apiFetch(`${API_BASE}/api/tasks/${id}`, {
     method: "PUT",
@@ -660,6 +673,18 @@ export async function getCreatorAccountNotes(
   return res.json()
 }
 
+export async function archiveCreatorAccountNoteMedia(
+  accountId: string,
+  noteId: string,
+): Promise<CreatorAccountSampleNote> {
+  const res = await apiFetch(
+    `${API_BASE}/api/creator-accounts/${encodeURIComponent(accountId)}/notes/${encodeURIComponent(noteId)}/archive-media`,
+    { method: "POST" },
+  )
+  if (!res.ok) await throwApiError(res, "旧帖图片保存失败")
+  return res.json()
+}
+
 export interface CreatorDiscoveryCandidate {
   user_id: string
   red_id: string
@@ -904,12 +929,32 @@ export interface AiImageMessage {
   reference?: Attachment
   references?: Attachment[]
   image?: Attachment
+  collage?: AiCollageSettings
+}
+
+export type AiImageMode = "ai" | "collage"
+
+export type AiCollageTemplate =
+  | "hero_headline"
+  | "split_compare"
+  | "story_triptych"
+  | "detail_grid"
+  | "review_card"
+
+export interface AiCollageSettings {
+  template: AiCollageTemplate
+  title: string
+  subtitle: string
+  background_color: string
+  text_color: string
 }
 
 export interface AiImageThread {
   id: string
   title: string
+  mode: AiImageMode
   image_prompt: string
+  collage: AiCollageSettings
   selected_references: Attachment[]
   generated_images: Attachment[]
   messages: AiImageMessage[]
@@ -987,7 +1032,7 @@ export interface AiDraft {
 }
 
 export interface AiConversation {
-  version: 1 | 2 | 3 | 4 | 5
+  version: 1 | 2 | 3 | 4 | 5 | 6
   task: AiTask
   creator_account_id?: string | null
   selected_creator_note_ids?: string[]
@@ -1017,6 +1062,8 @@ export interface AiStatus {
   sdk_installed: boolean
   chat_configured: boolean
   image_configured: boolean
+  chat_model: string | null
+  plan_model: string | null
   text_model: string | null
   image_model: string | null
   prompt_version: string
@@ -1065,6 +1112,12 @@ export interface AiImageResult {
   attachment: Attachment
   reference_attachment: Attachment
   reference_attachments: Attachment[]
+}
+
+export interface AiCollageRequest {
+  reference_images: File[]
+  reference_attachments: Attachment[]
+  settings: AiCollageSettings
 }
 
 export interface AiReferenceUploadResult {
@@ -1371,6 +1424,24 @@ export async function generateAiImage(payload: AiImageRequest): Promise<AiImageR
     body: formData,
   })
   if (!res.ok) await throwApiError(res, "AI 图片生成失败")
+  return res.json()
+}
+
+export async function generateAiCollage(payload: AiCollageRequest): Promise<AiImageResult> {
+  const formData = new FormData()
+  payload.reference_images.forEach((image) => formData.append("reference_images", image, image.name))
+  formData.append("reference_attachments", JSON.stringify(payload.reference_attachments))
+  formData.append("template", payload.settings.template)
+  formData.append("title", payload.settings.title)
+  formData.append("subtitle", payload.settings.subtitle)
+  formData.append("background_color", payload.settings.background_color)
+  formData.append("text_color", payload.settings.text_color)
+
+  const res = await apiFetch(`${API_BASE}/api/ai/collages`, {
+    method: "POST",
+    body: formData,
+  })
+  if (!res.ok) await throwApiError(res, "拼图生成失败")
   return res.json()
 }
 

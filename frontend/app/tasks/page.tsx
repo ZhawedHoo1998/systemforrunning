@@ -90,7 +90,7 @@ const ROLE_LABELS: Record<RoleTarget["role"], string> = {
   writer: "写手",
 }
 
-const CATEGORY_OPTIONS = ["内容产出", "选题策划", "素材建设", "发布运营", "数据复盘", "商业转化", "协作审核"]
+const CATEGORY_OPTIONS = ["内容产出", "选题策划", "素材建设", "发布运营", "数据复盘", "商业转化", "协作审核", "平台改进"]
 
 const RECOMMENDED_TARGETS: RoleTarget[] = [
   { role: "studio", metric: "本周有效内容产出", target: "15", unit: "篇" },
